@@ -4,10 +4,13 @@ command_system.__index = command_system
 
 local players_service = game:GetService("Players")
 local run_service = game:GetService("RunService")
-local selection_service = game:GetService("Selection")
 local teams_service = game:GetService("Teams")
 local debris_service = game:GetService("Debris")
 local ts = game:GetService("TweenService")
+local lighting_service = game:GetService("Lighting")
+local chat_service = game:GetService("Chat")
+local workspace_service = game:GetService("Workspace")
+local teleport_service = game:GetService("TeleportService")
 
 local commands = {}
 local command_aliases = {}
@@ -214,12 +217,12 @@ command_system.register_command("track", function(executor, args)
     }
     
     for i = 2, #args do
-        local option = args[i]:split("=")
+        local option = string.split(args[i], "=")
         if #option == 2 then
             local key, value = option[1]:lower(), option[2]
             
             if key == "color" then
-                local rgb = value:split(",")
+                local rgb = string.split(value, ",")
                 if #rgb == 3 then
                     options.color = Color3.fromRGB(
                         tonumber(rgb[1]) or 255,
@@ -270,11 +273,11 @@ command_system.register_command("track", function(executor, args)
     local last_position = humanoid_root_part.Position
     
     -- create lasso
-    local lasso = Instance.new("SelectionPartLasso")
-    lasso.Humanoid = character:FindFirstChildOfClass("Humanoid")
-    lasso.Part = humanoid_root_part
+    local lasso = Instance.new("SelectionBox") -- Changed from SelectionPartLasso to SelectionBox
+    lasso.Adornee = humanoid_root_part -- Changed from using Humanoid and Part to just Adornee
     lasso.Visible = true
     lasso.Color3 = options.color
+    lasso.LineThickness = 0.03
     lasso.Transparency = 0.5
     lasso.Parent = workspace
     
@@ -380,14 +383,44 @@ command_system.register_command("track", function(executor, args)
         if options.show_stats then
             local speed = velocity.Magnitude
             local height = current_position.Y
-            local direction = velocity.Unit
+            local direction
+            
+            if velocity.Magnitude > 0.1 then
+                direction = velocity.Unit
+            else
+                direction = Vector3.new(0, 0, 0)
+            end
+            
+            -- Get the humanoid state
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local state = "Unknown"
+            if humanoid then
+                local state_names = {
+                    [Enum.HumanoidStateType.FallingDown] = "Falling",
+                    [Enum.HumanoidStateType.Running] = "Running",
+                    [Enum.HumanoidStateType.Climbing] = "Climbing",
+                    [Enum.HumanoidStateType.Jumping] = "Jumping",
+                    [Enum.HumanoidStateType.Swimming] = "Swimming",
+                    [Enum.HumanoidStateType.Seated] = "Seated",
+                    [Enum.HumanoidStateType.Dead] = "Dead",
+                    [Enum.HumanoidStateType.Flying] = "Flying",
+                    [Enum.HumanoidStateType.Landed] = "Landed",
+                    [Enum.HumanoidStateType.GettingUp] = "Getting Up",
+                    [Enum.HumanoidStateType.Ragdoll] = "Ragdolled",
+                    [Enum.HumanoidStateType.StrafingNoPhysics] = "Strafing",
+                    [Enum.HumanoidStateType.Physics] = "Physics"
+                }
+                state = state_names[humanoid:GetState()] or "Unknown"
+            end
             
             local stats = string.format(
-                "Player: %s\nSpeed: %.2f studs/s\nHeight: %.2f\nAccel: %.2f studs/s²\nDir: %.2f, %.2f, %.2f",
+                "Player: %s\nSpeed: %.2f studs/s\nHeight: %.2f\nAccel: %.2f s/s²\nState: %s\nHealth: %.0f\nDir: %.1f, %.1f, %.1f",
                 target.Name,
                 speed,
                 height,
                 acceleration.Magnitude,
+                state,
+                humanoid and humanoid.Health or 0,
                 direction.X, direction.Y, direction.Z
             )
             
@@ -510,6 +543,694 @@ end, {
     permission_level = 1
 })
 
+-- Added quality of life commands
+command_system.register_command("tp", function(executor, args)
+    if #args < 1 then
+        return "usage: tp <player1> [player2]"
+    end
+    
+    local target1 = find_player(args[1], executor)
+    if not target1 then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target1) == "table" then
+        return "too many matching players for first argument, be more specific"
+    end
+    
+    local target2
+    
+    if #args >= 2 then
+        target2 = find_player(args[2], executor)
+        if not target2 then
+            return "player not found: " .. args[2]
+        end
+        
+        if type(target2) == "table" then
+            return "too many matching players for second argument, be more specific"
+        end
+    else
+        target2 = executor
+    end
+    
+    local char1 = target1.Character
+    local char2 = target2.Character
+    
+    if not char1 then
+        return "target 1 has no character"
+    end
+    
+    if not char2 then
+        return "target 2 has no character"
+    end
+    
+    local hrp1 = char1:FindFirstChild("HumanoidRootPart")
+    local hrp2 = char2:FindFirstChild("HumanoidRootPart")
+    
+    if not hrp1 then
+        return "target 1 has no HumanoidRootPart"
+    end
+    
+    if not hrp2 then
+        return "target 2 has no HumanoidRootPart"
+    end
+    
+    hrp1.CFrame = hrp2.CFrame * CFrame.new(0, 0, -3)
+    
+    return "teleported " .. target1.Name .. " to " .. target2.Name
+end, {
+    description = "teleport a player to another player",
+    usage = "tp <player1> [player2]",
+    aliases = {"teleport", "goto"},
+    cooldown = 3,
+    permission_level = 1
+})
+
+command_system.register_command("bring", function(executor, args)
+    if #args < 1 then
+        return "usage: bring <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target) == "table" then
+        for _, player in ipairs(target) do
+            local success, result = command_system.execute("tp " .. player.Name .. " " .. executor.Name, executor)
+        end
+        return "brought " .. #target .. " players to you"
+    else
+        local success, result = command_system.execute("tp " .. target.Name .. " " .. executor.Name, executor)
+        return "brought " .. target.Name .. " to you"
+    end
+end, {
+    description = "bring a player to you",
+    usage = "bring <player>",
+    aliases = {"summon"},
+    cooldown = 3,
+    permission_level = 1
+})
+
+command_system.register_command("kill", function(executor, args)
+    if #args < 1 then
+        return "usage: kill <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local function kill_player(player)
+        local character = player.Character
+        if not character then
+            return false
+        end
+        
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            return false
+        end
+        
+        humanoid.Health = 0
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if kill_player(player) then
+                count = count + 1
+            end
+        end
+        return "killed " .. count .. " players"
+    else
+        if kill_player(target) then
+            return "killed " .. target.Name
+        else
+            return "failed to kill " .. target.Name
+        end
+    end
+end, {
+    description = "kill a player",
+    usage = "kill <player>",
+    aliases = {"slay"},
+    cooldown = 5,
+    permission_level = 2
+})
+
+command_system.register_command("kick", function(executor, args)
+    if #args < 1 then
+        return "usage: kick <player> [reason]"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target) == "table" then
+        return "too many matching players, be more specific"
+    end
+    
+    local reason = "Kicked by admin"
+    if #args >= 2 then
+        reason = table.concat(args, " ", 2)
+    end
+    
+    target:Kick(reason)
+    return "kicked " .. target.Name .. " for: " .. reason
+end, {
+    description = "kick a player from the game",
+    usage = "kick <player> [reason]",
+    aliases = {},
+    cooldown = 10,
+    permission_level = 3
+})
+
+command_system.register_command("ban", function(executor, args)
+    if #args < 1 then
+        return "usage: ban <player> [reason]"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target) == "table" then
+        return "too many matching players, be more specific"
+    end
+    
+    local reason = "Banned by admin"
+    if #args >= 2 then
+        reason = table.concat(args, " ", 2)
+    end
+    
+    -- This would normally connect to a ban system
+    -- For this example, we'll just kick the player
+    target:Kick("BANNED: " .. reason)
+    return "banned " .. target.Name .. " for: " .. reason
+end, {
+    description = "ban a player from the game",
+    usage = "ban <player> [reason]",
+    aliases = {},
+    cooldown = 10,
+    permission_level = 4
+})
+
+command_system.register_command("speed", function(executor, args)
+    if #args < 2 then
+        return "usage: speed <player> <value>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local speed = tonumber(args[2])
+    if not speed then
+        return "invalid speed value"
+    end
+    
+    speed = math.clamp(speed, 0, 1000)
+    
+    local function set_speed(player)
+        local character = player.Character
+        if not character then
+            return false
+        end
+        
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            return false
+        end
+        
+        humanoid.WalkSpeed = speed
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if set_speed(player) then
+                count = count + 1
+            end
+        end
+        return "set speed to " .. speed .. " for " .. count .. " players"
+    else
+        if set_speed(target) then
+            return "set speed to " .. speed .. " for " .. target.Name
+        else
+            return "failed to set speed for " .. target.Name
+        end
+    end
+end, {
+    description = "set a player's walk speed",
+    usage = "speed <player> <value>",
+    aliases = {"walkspeed", "ws"},
+    cooldown = 2,
+    permission_level = 1
+})
+
+command_system.register_command("jump", function(executor, args)
+    if #args < 2 then
+        return "usage: jump <player> <value>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local jump = tonumber(args[2])
+    if not jump then
+        return "invalid jump power value"
+    end
+    
+    jump = math.clamp(jump, 0, 1000)
+    
+    local function set_jump(player)
+        local character = player.Character
+        if not character then
+            return false
+        end
+        
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            return false
+        end
+        
+        humanoid.JumpPower = jump
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if set_jump(player) then
+                count = count + 1
+            end
+        end
+        return "set jump power to " .. jump .. " for " .. count .. " players"
+    else
+        if set_jump(target) then
+            return "set jump power to " .. jump .. " for " .. target.Name
+        else
+            return "failed to set jump power for " .. target.Name
+        end
+    end
+end, {
+    description = "set a player's jump power",
+    usage = "jump <player> <value>",
+    aliases = {"jumppower", "jp"},
+    cooldown = 2,
+    permission_level = 1
+})
+
+command_system.register_command("heal", function(executor, args)
+    if #args < 1 then
+        return "usage: heal <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local function heal_player(player)
+        local character = player.Character
+        if not character then
+            return false
+        end
+        
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            return false
+        end
+        
+        humanoid.Health = humanoid.MaxHealth
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if heal_player(player) then
+                count = count + 1
+            end
+        end
+        return "healed " .. count .. " players"
+    else
+        if heal_player(target) then
+            return "healed " .. target.Name
+        else
+            return "failed to heal " .. target.Name
+        end
+    end
+end, {
+    description = "heal a player to full health",
+    usage = "heal <player>",
+    aliases = {"health"},
+    cooldown = 5,
+    permission_level = 1
+})
+
+command_system.register_command("time", function(executor, args)
+    if #args < 1 then
+        return "usage: time <hour>"
+    end
+    
+    local hour = tonumber(args[1])
+    if not hour then
+        return "invalid time value"
+    end
+    
+    hour = math.clamp(hour, 0, 24)
+    
+    lighting_service.ClockTime = hour
+    
+    return "set time to " .. hour .. ":00"
+end, {
+    description = "set the in-game time",
+    usage = "time <hour>",
+    aliases = {"settime"},
+    cooldown = 5,
+    permission_level = 2
+})
+
+command_system.register_command("day", function(executor, args)
+    lighting_service.ClockTime = 12
+    return "set time to day"
+end, {
+    description = "set the time to day",
+    usage = "day",
+    aliases = {},
+    cooldown = 5,
+    permission_level = 2
+})
+
+command_system.register_command("night", function(executor, args)
+    lighting_service.ClockTime = 0
+    return "set time to night"
+end, {
+    description = "set the time to night",
+    usage = "night",
+    aliases = {},
+    cooldown = 5,
+    permission_level = 2
+})
+
+command_system.register_command("admin", function(executor, args)
+    if #args < 1 then
+        return "usage: admin <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target) == "table" then
+        return "too many matching players, be more specific"
+    end
+    
+    local executor_permission = command_system.get_permission(executor.UserId)
+    if executor_permission < 4 then
+        return "insufficient permissions to make others admin"
+    end
+    
+    command_system.set_permission(target.UserId, 2)
+    return "granted admin permissions to " .. target.Name
+end, {
+    description = "give a player admin permissions",
+    usage = "admin <player>",
+    aliases = {"addadmin"},
+    cooldown = 5,
+    permission_level = 4
+})
+
+command_system.register_command("unadmin", function(executor, args)
+    if #args < 1 then
+        return "usage: unadmin <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target) == "table" then
+        return "too many matching players, be more specific"
+    end
+    
+    local executor_permission = command_system.get_permission(executor.UserId)
+    if executor_permission < 4 then
+        return "insufficient permissions to remove admin"
+    end
+    
+    command_system.set_permission(target.UserId, 0)
+    return "removed admin permissions from " .. target.Name
+end, {
+    description = "remove admin permissions from a player",
+    usage = "unadmin <player>",
+    aliases = {"removeadmin"},
+    cooldown = 5,
+    permission_level = 4
+})
+
+command_system.register_command("cmds", function(executor, args)
+    local executor_permission = command_system.get_permission(executor.UserId)
+    local available_commands = {}
+    
+    for name, metadata in pairs(command_metadata) do
+        if metadata.permission_level <= executor_permission then
+            table.insert(available_commands, {
+                name = name,
+                description = metadata.description,
+                usage = metadata.usage
+            })
+        end
+    end
+    
+    table.sort(available_commands, function(a, b)
+        return a.name < b.name
+    end)
+    
+    local message = "Available commands:"
+    for _, cmd in ipairs(available_commands) do
+        message = message .. "\n" .. cmd.usage .. " - " .. cmd.description
+    end
+    
+    return message
+end, {
+    description = "list all available commands",
+    usage = "cmds",
+    aliases = {"commands", "help"},
+    cooldown = 5,
+    permission_level = 0
+})
+
+command_system.register_command("spectate", function(executor, args)
+    if #args < 1 then
+        return "usage: spectate <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    if type(target) == "table" then
+        return "too many matching players, be more specific"
+    end
+    
+    local character = target.Character
+    if not character then
+        return "target has no character"
+    end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        return "target has no humanoid"
+    end
+    
+    executor.CameraSubject = humanoid
+    
+    return "now spectating " .. target.Name
+end, {
+    description = "spectate a player",
+    usage = "spectate <player>",
+    aliases = {"watch", "view"},
+    cooldown = 2,
+    permission_level = 1
+})
+
+command_system.register_command("unspectate", function(executor, args)
+    local character = executor.Character
+    if not character then
+        return "you have no character"
+    end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        return "you have no humanoid"
+    end
+    
+    executor.CameraSubject = humanoid
+    
+    return "stopped spectating"
+end, {
+    description = "stop spectating",
+    usage = "unspectate",
+    aliases = {"stopwatch", "stopview"},
+    cooldown = 2,
+    permission_level = 1
+})
+
+command_system.register_command("respawn", function(executor, args)
+    if #args < 1 then
+        local character = executor.Character
+        if character then
+            executor:LoadCharacter()
+            return "respawned yourself"
+        else
+            return "you have no character to respawn"
+        end
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local function respawn_player(player)
+        player:LoadCharacter()
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if respawn_player(player) then
+                count = count + 1
+            end
+        end
+        return "respawned " .. count .. " players"
+    else
+        if respawn_player(target) then
+            return "respawned " .. target.Name
+        else
+            return "failed to respawn " .. target.Name
+        end
+    end
+end, {
+    description = "respawn a player",
+    usage = "respawn [player]",
+    aliases = {"refresh", "re"},
+    cooldown = 5,
+    permission_level = 1
+})
+
+command_system.register_command("freeze", function(executor, args)
+    if #args < 1 then
+        return "usage: freeze <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local function freeze_player(player)
+        local character = player.Character
+        if not character then
+            return false
+        end
+        
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.Anchored = true
+            end
+        end
+        
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if freeze_player(player) then
+                count = count + 1
+            end
+        end
+        return "froze " .. count .. " players"
+    else
+        if freeze_player(target) then
+            return "froze " .. target.Name
+        else
+            return "failed to freeze " .. target.Name
+        end
+    end
+end, {
+    description = "freeze a player in place",
+    usage = "freeze <player>",
+    aliases = {"anchor"},
+    cooldown = 3,
+    permission_level = 2
+})
+
+command_system.register_command("unfreeze", function(executor, args)
+    if #args < 1 then
+        return "usage: unfreeze <player>"
+    end
+    
+    local target = find_player(args[1], executor)
+    if not target then
+        return "player not found: " .. args[1]
+    end
+    
+    local function unfreeze_player(player)
+        local character = player.Character
+        if not character then
+            return false
+        end
+        
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.Anchored = false
+            end
+        end
+        
+        return true
+    end
+    
+    if type(target) == "table" then
+        local count = 0
+        for _, player in ipairs(target) do
+            if unfreeze_player(player) then
+                count = count + 1
+            end
+        end
+        return "unfroze " .. count .. " players"
+    else
+        if unfreeze_player(target) then
+            return "unfroze " .. target.Name
+        else
+            return "failed to unfreeze " .. target.Name
+        end
+    end
+end, {
+    description = "unfreeze a player",
+    usage = "unfreeze <player>",
+    aliases = {"unanchor"},
+    cooldown = 3,
+    permission_level = 2
+})
+
 -- helper function to initialize the command system on the server
 function command_system.initialize_server(config)
     config = config or {}
@@ -528,10 +1249,10 @@ function command_system.initialize_server(config)
                 local success, result = command_system.execute(command_text, player)
                 
                 if result then
-                    local message = Instance.new("Message")
-                    message.Text = success and "Command: " .. result or "Error: " .. result
-                    message.Parent = player
-                    debris_service:AddItem(message, 3)
+                    local message_obj = Instance.new("Message")
+                    message_obj.Text = success and "Command: " .. result or "Error: " .. result
+                    message_obj.Parent = player
+                    debris_service:AddItem(message_obj, 3)
                 end
             end
         end)
@@ -544,10 +1265,10 @@ function command_system.initialize_server(config)
                 local success, result = command_system.execute(command_text, player)
                 
                 if result then
-                    local message = Instance.new("Message")
-                    message.Text = success and "Command: " .. result or "Error: " .. result
-                    message.Parent = player
-                    debris_service:AddItem(message, 3)
+                    local message_obj = Instance.new("Message")
+                    message_obj.Text = success and "Command: " .. result or "Error: " .. result
+                    message_obj.Parent = player
+                    debris_service:AddItem(message_obj, 3)
                 end
             end
         end)
@@ -557,4 +1278,12 @@ function command_system.initialize_server(config)
     return command_system
 end
 
-return command_system
+-- Add support for being loaded via HTTP
+if script then
+    return command_system
+else
+    -- This is being executed directly from loadstring
+    return function()
+        return command_system
+    end
+end
