@@ -1,28 +1,47 @@
--- command framework module
-local command_system = {}
-command_system.__index = command_system
+-- XVI Admin Suite
+-- Main script containing the GUI library and command functionality
 
-local players_service = game:GetService("Players")
-local run_service = game:GetService("RunService")
-local teams_service = game:GetService("Teams")
-local debris_service = game:GetService("Debris")
-local ts = game:GetService("TweenService")
-local lighting_service = game:GetService("Lighting")
-local chat_service = game:GetService("Chat")
-local workspace_service = game:GetService("Workspace")
-local teleport_service = game:GetService("TeleportService")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local TextService = game:GetService("TextService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
 
-local commands = {}
-local command_aliases = {}
-local command_cooldowns = {}
-local command_permissions = {}
-local command_metadata = {}
+-- Initialize local state
+local AdminSuite = getgenv().XVIAdminSuite
+local GUI = {}
+local CommandBar = {}
+local CommandHistory = {}
+local HistoryIndex = 0
+local CommandSuggestions = {}
+local SuggestionIndex = 0
+local TabPages = {}
+local CurrentTab = nil
+local MenuVisible = false
+local CommandBarVisible = false
+local Dragging = false
+local DragStart = nil
+local StartPos = nil
 
-local function deep_copy(original)
+-- Utility functions
+local function CreateTween(instance, properties, duration, easingStyle, easingDirection)
+    local tInfo = TweenInfo.new(
+        duration or 0.3,
+        easingStyle or Enum.EasingStyle.Quad,
+        easingDirection or Enum.EasingDirection.Out
+    )
+    local tween = TweenService:Create(instance, tInfo, properties)
+    return tween
+end
+
+local function DeepCopy(original)
     local copy = {}
     for k, v in pairs(original) do
         if type(v) == "table" then
-            copy[k] = deep_copy(v)
+            copy[k] = DeepCopy(v)
         else
             copy[k] = v
         end
@@ -30,1260 +49,2625 @@ local function deep_copy(original)
     return copy
 end
 
-local function parse_args(args_string)
-    local args = {}
-    local current_arg = ""
-    local in_quotes = false
-    
-    for i = 1, #args_string do
-        local char = args_string:sub(i, i)
-        
-        if char == '"' then
-            in_quotes = not in_quotes
-        elseif char == " " and not in_quotes then
-            if current_arg ~= "" then
-                table.insert(args, current_arg)
-                current_arg = ""
-            end
-        else
-            current_arg = current_arg .. char
-        end
-    end
-    
-    if current_arg ~= "" then
-        table.insert(args, current_arg)
-    end
-    
-    return args
+local function FormatPlayerName(player)
+    return player.Name .. " (" .. player.DisplayName .. ")"
 end
 
-local function find_player(name, executor)
-    if name:lower() == "me" then
-        return executor
-    elseif name:lower() == "all" then
-        return players_service:GetPlayers()
-    elseif name:lower() == "others" then
-        local all_players = players_service:GetPlayers()
-        local filtered = {}
-        for _, player in ipairs(all_players) do
-            if player ~= executor then
-                table.insert(filtered, player)
-            end
-        end
-        return filtered
-    elseif name:lower() == "random" then
-        local all_players = players_service:GetPlayers()
-        return {all_players[math.random(1, #all_players)]}
-    else
-        local found_players = {}
-        for _, player in ipairs(players_service:GetPlayers()) do
-            if player.Name:lower():sub(1, #name) == name:lower() or 
-               player.DisplayName:lower():sub(1, #name) == name:lower() then
-                table.insert(found_players, player)
-            end
-        end
-        
-        if #found_players == 0 then
-            return nil
-        elseif #found_players == 1 then
-            return found_players[1]
-        else
-            return found_players
-        end
-    end
-end
-
-function command_system.register_command(name, callback, metadata)
-    assert(type(name) == "string", "command name must be a string")
-    assert(type(callback) == "function", "command callback must be a function")
-    
+local function FindPlayer(name)
     name = name:lower()
-    commands[name] = callback
     
-    if metadata then
-        metadata.usage = metadata.usage or name
-        metadata.description = metadata.description or "no description provided"
-        metadata.aliases = metadata.aliases or {}
-        metadata.cooldown = metadata.cooldown or 0
-        metadata.permission_level = metadata.permission_level or 0
-        
-        command_metadata[name] = metadata
-        
-        for _, alias in ipairs(metadata.aliases) do
-            command_aliases[alias:lower()] = name
+    -- Try exact match first
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Name:lower() == name or player.DisplayName:lower() == name then
+            return player
         end
-    else
-        command_metadata[name] = {
-            usage = name,
-            description = "no description provided",
-            aliases = {},
-            cooldown = 0,
-            permission_level = 0
+    end
+    
+    -- Try partial match
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Name:lower():sub(1, #name) == name or 
+           player.DisplayName:lower():sub(1, #name) == name then
+            return player
+        end
+    end
+    
+    return nil
+end
+
+-- Custom GUI Library
+local GuiLibrary = {}
+
+function GuiLibrary.New()
+    local self = {}
+    
+    -- Create base GUI structure
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "XVIAdminSuiteGui"
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    -- Apply protection if possible
+    pcall(function()
+        ScreenGui.DisplayOrder = 999
+        if syn and syn.protect_gui then
+            syn.protect_gui(ScreenGui)
+        end
+    end)
+    
+    -- Create the main container
+    local MainContainer = Instance.new("Frame")
+    MainContainer.Name = "MainContainer"
+    MainContainer.Size = UDim2.new(0, 600, 0, 400)
+    MainContainer.Position = UDim2.new(0.5, -300, 0.5, -200)
+    MainContainer.BackgroundColor3 = AdminSuite.Config.Theme.Primary
+    MainContainer.BorderSizePixel = 0
+    MainContainer.ClipsDescendants = true
+    MainContainer.Visible = false
+    MainContainer.Parent = ScreenGui
+    
+    -- Round the corners
+    local UICorner = Instance.new("UICorner")
+    UICorner.CornerRadius = UDim.new(0, 8)
+    UICorner.Parent = MainContainer
+    
+    -- Add shadow
+    local Shadow = Instance.new("ImageLabel")
+    Shadow.Name = "Shadow"
+    Shadow.Size = UDim2.new(1, 40, 1, 40)
+    Shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    Shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    Shadow.BackgroundTransparency = 1
+    Shadow.Image = "rbxassetid://6015897843"
+    Shadow.ImageColor3 = Color3.new(0, 0, 0)
+    Shadow.ImageTransparency = 0.5
+    Shadow.ScaleType = Enum.ScaleType.Slice
+    Shadow.SliceCenter = Rect.new(49, 49, 450, 450)
+    Shadow.ZIndex = -1
+    Shadow.Parent = MainContainer
+    
+    -- Create title bar
+    local TitleBar = Instance.new("Frame")
+    TitleBar.Name = "TitleBar"
+    TitleBar.Size = UDim2.new(1, 0, 0, 36)
+    TitleBar.BackgroundColor3 = AdminSuite.Config.Theme.Secondary
+    TitleBar.BorderSizePixel = 0
+    TitleBar.Parent = MainContainer
+    
+    local TitleBarCorner = Instance.new("UICorner")
+    TitleBarCorner.CornerRadius = UDim.new(0, 8)
+    TitleBarCorner.Parent = TitleBar
+    
+    local TitleBarFix = Instance.new("Frame")
+    TitleBarFix.Name = "TitleBarFix"
+    TitleBarFix.Size = UDim2.new(1, 0, 0, 10)
+    TitleBarFix.Position = UDim2.new(0, 0, 1, -10)
+    TitleBarFix.BackgroundColor3 = AdminSuite.Config.Theme.Secondary
+    TitleBarFix.BorderSizePixel = 0
+    TitleBarFix.ZIndex = 0
+    TitleBarFix.Parent = TitleBar
+    
+    -- Title text
+    local TitleText = Instance.new("TextLabel")
+    TitleText.Name = "TitleText"
+    TitleText.Size = UDim2.new(1, -120, 1, 0)
+    TitleText.Position = UDim2.new(0, 12, 0, 0)
+    TitleText.BackgroundTransparency = 1
+    TitleText.Text = "XVI Admin Suite"
+    TitleText.Font = Enum.Font.GothamBold
+    TitleText.TextSize = 16
+    TitleText.TextColor3 = AdminSuite.Config.Theme.Text
+    TitleText.TextXAlignment = Enum.TextXAlignment.Left
+    TitleText.Parent = TitleBar
+    
+    -- Close button
+    local CloseButton = Instance.new("TextButton")
+    CloseButton.Name = "CloseButton"
+    CloseButton.Size = UDim2.new(0, 36, 0, 36)
+    CloseButton.Position = UDim2.new(1, -36, 0, 0)
+    CloseButton.BackgroundTransparency = 1
+    CloseButton.Text = "×"
+    CloseButton.Font = Enum.Font.GothamBold
+    CloseButton.TextSize = 24
+    CloseButton.TextColor3 = AdminSuite.Config.Theme.Text
+    CloseButton.Parent = TitleBar
+    
+    CloseButton.MouseEnter:Connect(function()
+        CloseButton.TextColor3 = Color3.fromRGB(255, 100, 100)
+    end)
+    
+    CloseButton.MouseLeave:Connect(function()
+        CloseButton.TextColor3 = AdminSuite.Config.Theme.Text
+    end)
+    
+    CloseButton.MouseButton1Click:Connect(function()
+        MenuVisible = false
+        local tween = CreateTween(MainContainer, {Position = UDim2.new(-0.5, 0, 0.5, -200)}, 0.3)
+        tween:Play()
+        tween.Completed:Connect(function()
+            MainContainer.Visible = false
+            MainContainer.Position = UDim2.new(0.5, -300, 0.5, -200)
+        end)
+    end)
+    
+    -- Tab bar
+    local TabContainer = Instance.new("Frame")
+    TabContainer.Name = "TabContainer"
+    TabContainer.Size = UDim2.new(0, 150, 1, -36)
+    TabContainer.Position = UDim2.new(0, 0, 0, 36)
+    TabContainer.BackgroundColor3 = AdminSuite.Config.Theme.Secondary
+    TabContainer.BorderSizePixel = 0
+    TabContainer.Parent = MainContainer
+    
+    local TabScrollFrame = Instance.new("ScrollingFrame")
+    TabScrollFrame.Name = "TabScrollFrame"
+    TabScrollFrame.Size = UDim2.new(1, 0, 1, 0)
+    TabScrollFrame.BackgroundTransparency = 1
+    TabScrollFrame.BorderSizePixel = 0
+    TabScrollFrame.ScrollBarThickness = 4
+    TabScrollFrame.ScrollBarImageColor3 = AdminSuite.Config.Theme.Accent
+    TabScrollFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+    TabScrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    TabScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    TabScrollFrame.Parent = TabContainer
+    
+    local TabList = Instance.new("UIListLayout")
+    TabList.Name = "TabList"
+    TabList.SortOrder = Enum.SortOrder.LayoutOrder
+    TabList.Padding = UDim.new(0, 2)
+    TabList.Parent = TabScrollFrame
+    
+    -- Content area
+    local ContentContainer = Instance.new("Frame")
+    ContentContainer.Name = "ContentContainer"
+    ContentContainer.Size = UDim2.new(1, -150, 1, -36)
+    ContentContainer.Position = UDim2.new(0, 150, 0, 36)
+    ContentContainer.BackgroundColor3 = AdminSuite.Config.Theme.Primary
+    ContentContainer.BorderSizePixel = 0
+    ContentContainer.ClipsDescendants = true
+    ContentContainer.Parent = MainContainer
+    
+    -- Command bar
+    local CommandBarFrame = Instance.new("Frame")
+    CommandBarFrame.Name = "CommandBarFrame"
+    CommandBarFrame.Size = UDim2.new(0, 500, 0, 40)
+    CommandBarFrame.Position = AdminSuite.Config.CommandBarPosition
+    CommandBarFrame.AnchorPoint = Vector2.new(0.5, 0)
+    CommandBarFrame.BackgroundColor3 = AdminSuite.Config.Theme.Primary
+    CommandBarFrame.BorderSizePixel = 0
+    CommandBarFrame.Visible = false
+    CommandBarFrame.Parent = ScreenGui
+    
+    local CommandBarCorner = Instance.new("UICorner")
+    CommandBarCorner.CornerRadius = UDim.new(0, 8)
+    CommandBarCorner.Parent = CommandBarFrame
+    
+    local CommandBarShadow = Instance.new("ImageLabel")
+    CommandBarShadow.Name = "Shadow"
+    CommandBarShadow.Size = UDim2.new(1, 30, 1, 30)
+    CommandBarShadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    CommandBarShadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    CommandBarShadow.BackgroundTransparency = 1
+    CommandBarShadow.Image = "rbxassetid://6015897843"
+    CommandBarShadow.ImageColor3 = Color3.new(0, 0, 0)
+    CommandBarShadow.ImageTransparency = 0.5
+    CommandBarShadow.ScaleType = Enum.ScaleType.Slice
+    CommandBarShadow.SliceCenter = Rect.new(49, 49, 450, 450)
+    CommandBarShadow.ZIndex = -1
+    CommandBarShadow.Parent = CommandBarFrame
+    
+    local CommandPrefix = Instance.new("TextLabel")
+    CommandPrefix.Name = "Prefix"
+    CommandPrefix.Size = UDim2.new(0, 36, 1, 0)
+    CommandPrefix.BackgroundTransparency = 1
+    CommandPrefix.Text = AdminSuite.Config.Prefix
+    CommandPrefix.Font = Enum.Font.GothamBold
+    CommandPrefix.TextSize = 18
+    CommandPrefix.TextColor3 = AdminSuite.Config.Theme.Accent
+    CommandPrefix.Parent = CommandBarFrame
+    
+    local CommandInput = Instance.new("TextBox")
+    CommandInput.Name = "Input"
+    CommandInput.Size = UDim2.new(1, -40, 1, 0)
+    CommandInput.Position = UDim2.new(0, 36, 0, 0)
+    CommandInput.BackgroundTransparency = 1
+    CommandInput.Text = ""
+    CommandInput.PlaceholderText = "Type a command..."
+    CommandInput.Font = Enum.Font.Gotham
+    CommandInput.TextSize = 16
+    CommandInput.TextColor3 = AdminSuite.Config.Theme.Text
+    CommandInput.TextXAlignment = Enum.TextXAlignment.Left
+    CommandInput.ClipsDescendants = true
+    CommandInput.ClearTextOnFocus = false
+    CommandInput.Parent = CommandBarFrame
+    
+    -- Command suggestions
+    local SuggestionsFrame = Instance.new("Frame")
+    SuggestionsFrame.Name = "SuggestionsFrame"
+    SuggestionsFrame.Size = UDim2.new(1, 0, 0, 0)
+    SuggestionsFrame.Position = UDim2.new(0, 0, 1, 5)
+    SuggestionsFrame.BackgroundColor3 = AdminSuite.Config.Theme.Primary
+    SuggestionsFrame.BorderSizePixel = 0
+    SuggestionsFrame.ClipsDescendants = true
+    SuggestionsFrame.Visible = false
+    SuggestionsFrame.ZIndex = 5
+    SuggestionsFrame.Parent = CommandBarFrame
+    
+    local SuggestionsCorner = Instance.new("UICorner")
+    SuggestionsCorner.CornerRadius = UDim.new(0, 8)
+    SuggestionsCorner.Parent = SuggestionsFrame
+    
+    local SuggestionsShadow = Instance.new("ImageLabel")
+    SuggestionsShadow.Name = "Shadow"
+    SuggestionsShadow.Size = UDim2.new(1, 30, 1, 30)
+    SuggestionsShadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    SuggestionsShadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    SuggestionsShadow.BackgroundTransparency = 1
+    SuggestionsShadow.Image = "rbxassetid://6015897843"
+    SuggestionsShadow.ImageColor3 = Color3.new(0, 0, 0)
+    SuggestionsShadow.ImageTransparency = 0.5
+    SuggestionsShadow.ScaleType = Enum.ScaleType.Slice
+    SuggestionsShadow.SliceCenter = Rect.new(49, 49, 450, 450)
+    SuggestionsShadow.ZIndex = 4
+    SuggestionsShadow.Parent = SuggestionsFrame
+    
+    local SuggestionsScroll = Instance.new("ScrollingFrame")
+    SuggestionsScroll.Name = "SuggestionsScroll"
+    SuggestionsScroll.Size = UDim2.new(1, 0, 1, 0)
+    SuggestionsScroll.BackgroundTransparency = 1
+    SuggestionsScroll.BorderSizePixel = 0
+    SuggestionsScroll.ScrollBarThickness = 4
+    SuggestionsScroll.ScrollBarImageColor3 = AdminSuite.Config.Theme.Accent
+    SuggestionsScroll.ZIndex = 6
+    SuggestionsScroll.Parent = SuggestionsFrame
+    
+    local SuggestionsList = Instance.new("UIListLayout")
+    SuggestionsList.Name = "SuggestionsList"
+    SuggestionsList.SortOrder = Enum.SortOrder.LayoutOrder
+    SuggestionsList.Padding = UDim.new(0, 2)
+    SuggestionsList.Parent = SuggestionsScroll
+    
+    -- Make ScreenGui a child of PlayerGui
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    
+    -- Dragging functionality for main container
+    TitleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            Dragging = true
+            DragStart = input.Position
+            StartPos = MainContainer.Position
+        end
+    end)
+    
+    TitleBar.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            Dragging = false
+        end
+    end)
+    
+    UserInputService.InputChanged:Connect(function(input)
+        if Dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - DragStart
+            MainContainer.Position = UDim2.new(
+                StartPos.X.Scale,
+                StartPos.X.Offset + delta.X,
+                StartPos.Y.Scale,
+                StartPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    
+    -- Command bar dragging functionality
+    local DraggingCmdBar = false
+    local CmdBarDragStart = nil
+    local CmdBarStartPos = nil
+    
+    CommandPrefix.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            DraggingCmdBar = true
+            CmdBarDragStart = input.Position
+            CmdBarStartPos = CommandBarFrame.Position
+        end
+    end)
+    
+    CommandPrefix.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            DraggingCmdBar = false
+            -- Save new position
+            AdminSuite.Config.CommandBarPosition = CommandBarFrame.Position
+            if AdminSuite.Config.AutoSave then
+                AdminSuite.Internal.SaveConfig()
+            end
+        end
+    end)
+    
+    UserInputService.InputChanged:Connect(function(input)
+        if DraggingCmdBar and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - CmdBarDragStart
+            CommandBarFrame.Position = UDim2.new(
+                CmdBarStartPos.X.Scale,
+                CmdBarStartPos.X.Offset + delta.X,
+                CmdBarStartPos.Y.Scale,
+                CmdBarStartPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    
+    -- Command input functionality
+    CommandInput.Focused:Connect(function()
+        -- Show suggestions if there's text
+        if #CommandInput.Text > 0 then
+            self:UpdateSuggestions(CommandInput.Text)
+        end
+    end)
+    
+    CommandInput.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            -- Execute command
+            local command = CommandInput.Text
+            if #command > 0 then
+                -- Add to history
+                table.insert(CommandHistory, 1, command)
+                if #CommandHistory > 50 then
+                    table.remove(CommandHistory)
+                end
+                HistoryIndex = 0
+                
+                -- Execute
+                self:ExecuteCommand(command)
+                CommandInput.Text = ""
+            end
+        end
+        
+        -- Hide suggestions
+        SuggestionsFrame.Visible = false
+    end)
+    
+    CommandInput:GetPropertyChangedSignal("Text"):Connect(function()
+        self:UpdateSuggestions(CommandInput.Text)
+    end)
+    
+    -- Method to add a tab
+    function self:AddTab(name, icon, order)
+        -- Create tab button
+        local TabButton = Instance.new("TextButton")
+        TabButton.Name = name .. "Tab"
+        TabButton.Size = UDim2.new(1, 0, 0, 40)
+        TabButton.BackgroundTransparency = 1
+        TabButton.Text = name
+        TabButton.Font = Enum.Font.Gotham
+        TabButton.TextSize = 14
+        TabButton.TextColor3 = AdminSuite.Config.Theme.Text
+        TabButton.LayoutOrder = order or #TabScrollFrame:GetChildren()
+        TabButton.Parent = TabScrollFrame
+        
+        -- Add icon if provided
+        if icon then
+            local TabIcon = Instance.new("ImageLabel")
+            TabIcon.Name = "Icon"
+            TabIcon.Size = UDim2.new(0, 20, 0, 20)
+            TabIcon.Position = UDim2.new(0, 10, 0.5, 0)
+            TabIcon.AnchorPoint = Vector2.new(0, 0.5)
+            TabIcon.BackgroundTransparency = 1
+            TabIcon.Image = icon
+            TabIcon.Parent = TabButton
+            
+            -- Adjust text position
+            TabButton.TextXAlignment = Enum.TextXAlignment.Right
+            TabButton.TextSize = 14
+        end
+        
+        -- Create content page
+        local ContentPage = Instance.new("ScrollingFrame")
+        ContentPage.Name = name .. "Page"
+        ContentPage.Size = UDim2.new(1, 0, 1, 0)
+        ContentPage.BackgroundTransparency = 1
+        ContentPage.BorderSizePixel = 0
+        ContentPage.ScrollBarThickness = 4
+        ContentPage.ScrollBarImageColor3 = AdminSuite.Config.Theme.Accent
+        ContentPage.Visible = false
+        ContentPage.Parent = ContentContainer
+        
+        local ContentPadding = Instance.new("UIPadding")
+        ContentPadding.PaddingLeft = UDim.new(0, 12)
+        ContentPadding.PaddingRight = UDim.new(0, 12)
+        ContentPadding.PaddingTop = UDim.new(0, 12)
+        ContentPadding.PaddingBottom = UDim.new(0, 12)
+        ContentPadding.Parent = ContentPage
+        
+        local ContentList = Instance.new("UIListLayout")
+        ContentList.SortOrder = Enum.SortOrder.LayoutOrder
+        ContentList.Padding = UDim.new(0, 8)
+        ContentList.Parent = ContentPage
+        
+        -- Store reference to this tab
+        TabPages[name] = {
+            Button = TabButton,
+            Page = ContentPage
+        }
+        
+        -- Tab click handler
+        TabButton.MouseButton1Click:Connect(function()
+            self:SelectTab(name)
+        end)
+        
+        -- If this is the first tab, select it
+        if not CurrentTab then
+            self:SelectTab(name)
+        end
+        
+        return {
+            AddSection = function(sectionName, collapsible)
+                return self:AddSection(ContentPage, sectionName, collapsible)
+            end
         }
     end
-end
-
-function command_system.execute(input, executor)
-    local split_input = parse_args(input)
-    local cmd_name = table.remove(split_input, 1):lower()
     
-    if command_aliases[cmd_name] then
-        cmd_name = command_aliases[cmd_name]
+    -- Method to select a tab
+    function self:SelectTab(name)
+        if CurrentTab then
+            -- Deselect current tab
+            TabPages[CurrentTab].Button.BackgroundTransparency = 1
+            TabPages[CurrentTab].Button.TextColor3 = AdminSuite.Config.Theme.Text
+            TabPages[CurrentTab].Page.Visible = false
+        end
+        
+        -- Select new tab
+        CurrentTab = name
+        TabPages[name].Button.BackgroundTransparency = 0.8
+        TabPages[name].Button.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+        TabPages[name].Button.TextColor3 = Color3.new(1, 1, 1)
+        TabPages[name].Page.Visible = true
     end
     
-    local command_func = commands[cmd_name]
-    
-    if not command_func then
-        return false, "command not found: " .. cmd_name
-    end
-    
-    local metadata = command_metadata[cmd_name]
-    
-    -- check permissions
-    local executor_permission = command_permissions[executor.UserId] or 0
-    if executor_permission < metadata.permission_level then
-        return false, "insufficient permissions to run this command"
-    end
-    
-    -- check cooldown
-    local cooldown_key = executor.UserId .. "_" .. cmd_name
-    local current_time = tick()
-    if command_cooldowns[cooldown_key] and 
-       current_time - command_cooldowns[cooldown_key] < metadata.cooldown then
-        local remaining = math.ceil(metadata.cooldown - (current_time - command_cooldowns[cooldown_key]))
-        return false, "command on cooldown for " .. remaining .. " second(s)"
-    end
-    
-    -- set cooldown
-    command_cooldowns[cooldown_key] = current_time
-    
-    -- execute command
-    local success, result = pcall(function()
-        return command_func(executor, split_input)
-    end)
-    
-    if not success then
-        return false, "error executing command: " .. result
-    end
-    
-    return true, result
-end
-
-function command_system.get_commands()
-    local result = {}
-    for name, metadata in pairs(command_metadata) do
-        table.insert(result, {
-            name = name,
-            metadata = deep_copy(metadata)
-        })
-    end
-    return result
-end
-
-function command_system.set_permission(user_id, level)
-    command_permissions[user_id] = level
-end
-
-function command_system.get_permission(user_id)
-    return command_permissions[user_id] or 0
-end
-
--- initialize advanced tracker command
-local tracker_data = {}
-
-command_system.register_command("track", function(executor, args)
-    if #args < 1 then
-        return "usage: track <player> [options]"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    -- parse options
-    local options = {
-        color = Color3.fromRGB(255, 0, 0),
-        interval = 0.1,
-        duration = 30,
-        show_path = true,
-        show_trajectory = true,
-        show_stats = true,
-        path_length = 60
-    }
-    
-    for i = 2, #args do
-        local option = string.split(args[i], "=")
-        if #option == 2 then
-            local key, value = option[1]:lower(), option[2]
+    -- Method to add a section to a tab
+    function self:AddSection(parent, name, collapsible)
+        local SectionFrame = Instance.new("Frame")
+        SectionFrame.Name = name .. "Section"
+        SectionFrame.Size = UDim2.new(1, 0, 0, 0)
+        SectionFrame.BackgroundColor3 = AdminSuite.Config.Theme.Secondary
+        SectionFrame.BorderSizePixel = 0
+        SectionFrame.AutomaticSize = Enum.AutomaticSize.Y
+        SectionFrame.Parent = parent
+        
+        local SectionCorner = Instance.new("UICorner")
+        SectionCorner.CornerRadius = UDim.new(0, 8)
+        SectionCorner.Parent = SectionFrame
+        
+        local SectionHeader = Instance.new("Frame")
+        SectionHeader.Name = "Header"
+        SectionHeader.Size = UDim2.new(1, 0, 0, 36)
+        SectionHeader.BackgroundTransparency = 1
+        SectionHeader.Parent = SectionFrame
+        
+        local SectionTitle = Instance.new("TextLabel")
+        SectionTitle.Name = "Title"
+        SectionTitle.Size = UDim2.new(1, -40, 1, 0)
+        SectionTitle.Position = UDim2.new(0, 10, 0, 0)
+        SectionTitle.BackgroundTransparency = 1
+        SectionTitle.Text = name
+        SectionTitle.Font = Enum.Font.GothamBold
+        SectionTitle.TextSize = 14
+        SectionTitle.TextColor3 = AdminSuite.Config.Theme.Text
+        SectionTitle.TextXAlignment = Enum.TextXAlignment.Left
+        SectionTitle.Parent = SectionHeader
+        
+        local SectionContainer = Instance.new("Frame")
+        SectionContainer.Name = "Container"
+        SectionContainer.Size = UDim2.new(1, 0, 0, 0)
+        SectionContainer.Position = UDim2.new(0, 0, 0, 36)
+        SectionContainer.BackgroundTransparency = 1
+        SectionContainer.AutomaticSize = Enum.AutomaticSize.Y
+        SectionContainer.ClipsDescendants = false
+        SectionContainer.Parent = SectionFrame
+        
+        local SectionPadding = Instance.new("UIPadding")
+        SectionPadding.PaddingLeft = UDim.new(0, 10)
+        SectionPadding.PaddingRight = UDim.new(0, 10)
+        SectionPadding.PaddingBottom = UDim.new(0, 10)
+        SectionPadding.Parent = SectionContainer
+        
+        local SectionList = Instance.new("UIListLayout")
+        SectionList.SortOrder = Enum.SortOrder.LayoutOrder
+        SectionList.Padding = UDim.new(0, 8)
+        SectionList.Parent = SectionContainer
+        
+        -- Add collapse functionality if requested
+        if collapsible then
+            local ToggleButton = Instance.new("TextButton")
+            ToggleButton.Name = "ToggleButton"
+            ToggleButton.Size = UDim2.new(0, 36, 0, 36)
+            ToggleButton.Position = UDim2.new(1, -36, 0, 0)
+            ToggleButton.BackgroundTransparency = 1
+            ToggleButton.Text = "-"
+            ToggleButton.Font = Enum.Font.GothamBold
+            ToggleButton.TextSize = 14
+            ToggleButton.TextColor3 = AdminSuite.Config.Theme.Text
+            ToggleButton.Parent = SectionHeader
             
-            if key == "color" then
-                local rgb = string.split(value, ",")
-                if #rgb == 3 then
-                    options.color = Color3.fromRGB(
-                        tonumber(rgb[1]) or 255,
-                        tonumber(rgb[2]) or 0,
-                        tonumber(rgb[3]) or 0
-                    )
+            local collapsed = false
+            
+            ToggleButton.MouseButton1Click:Connect(function()
+                collapsed = not collapsed
+                
+                if collapsed then
+                    ToggleButton.Text = "+"
+                    SectionContainer.Visible = false
+                else
+                    ToggleButton.Text = "-"
+                    SectionContainer.Visible = true
                 end
-            elseif key == "interval" then
-                options.interval = tonumber(value) or 0.1
-                options.interval = math.max(0.05, options.interval)
-            elseif key == "duration" then
-                options.duration = tonumber(value) or 30
-                options.duration = math.clamp(options.duration, 1, 300)
-            elseif key == "path" then
-                options.show_path = value:lower() == "true"
-            elseif key == "trajectory" then
-                options.show_trajectory = value:lower() == "true"
-            elseif key == "stats" then
-                options.show_stats = value:lower() == "true"
-            elseif key == "pathlength" then
-                options.path_length = tonumber(value) or 60
-                options.path_length = math.clamp(options.path_length, 5, 300)
+            end)
+        end
+        
+        -- Return interface to add elements to this section
+        return {
+            AddButton = function(text, callback)
+                return self:AddButton(SectionContainer, text, callback)
+            end,
+            AddToggle = function(text, default, callback)
+                return self:AddToggle(SectionContainer, text, default, callback)
+            end,
+            AddSlider = function(text, min, max, default, callback)
+                return self:AddSlider(SectionContainer, text, min, max, default, callback)
+            end,
+            AddTextBox = function(text, placeholder, default, callback)
+                return self:AddTextBox(SectionContainer, text, placeholder, default, callback)
+            end,
+            AddDropdown = function(text, options, default, callback)
+                return self:AddDropdown(SectionContainer, text, options, default, callback)
+            end,
+            AddColorPicker = function(text, default, callback)
+                return self:AddColorPicker(SectionContainer, text, default, callback)
+            end,
+            AddLabel = function(text)
+                return self:AddLabel(SectionContainer, text)
+            end
+        }
+    end
+    
+    -- Method to add a button
+    function self:AddButton(parent, text, callback)
+        local ButtonFrame = Instance.new("Frame")
+        ButtonFrame.Name = "ButtonFrame"
+        ButtonFrame.Size = UDim2.new(1, 0, 0, 32)
+        ButtonFrame.BackgroundTransparency = 1
+        ButtonFrame.Parent = parent
+        
+        local Button = Instance.new("TextButton")
+        Button.Name = "Button"
+        Button.Size = UDim2.new(1, 0, 1, 0)
+        Button.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+        Button.BackgroundTransparency = 0.7
+        Button.Text = text
+        Button.Font = Enum.Font.Gotham
+        Button.TextSize = 14
+        Button.TextColor3 = AdminSuite.Config.Theme.Text
+        Button.Parent = ButtonFrame
+        
+        local ButtonCorner = Instance.new("UICorner")
+        ButtonCorner.CornerRadius = UDim.new(0, 6)
+        ButtonCorner.Parent = Button
+        
+        -- Hover effects
+        Button.MouseEnter:Connect(function()
+            CreateTween(Button, {BackgroundTransparency = 0.5}, 0.2):Play()
+        end)
+        
+        Button.MouseLeave:Connect(function()
+            CreateTween(Button, {BackgroundTransparency = 0.7}, 0.2):Play()
+        end)
+        
+        -- Click effect
+        Button.MouseButton1Down:Connect(function()
+            CreateTween(Button, {BackgroundTransparency = 0.3}, 0.1):Play()
+        end)
+        
+        Button.MouseButton1Up:Connect(function()
+            CreateTween(Button, {BackgroundTransparency = 0.5}, 0.1):Play()
+        end)
+        
+        -- Click handler
+        Button.MouseButton1Click:Connect(function()
+            if callback then
+                callback()
+            end
+        end)
+        
+        return {
+            SetText = function(newText)
+                Button.Text = newText
+            end,
+            SetCallback = function(newCallback)
+                callback = newCallback
+            end
+        }
+    end
+    
+    -- Method to add a toggle
+    function self:AddToggle(parent, text, default, callback)
+        local ToggleFrame = Instance.new("Frame")
+        ToggleFrame.Name = "ToggleFrame"
+        ToggleFrame.Size = UDim2.new(1, 0, 0, 32)
+        ToggleFrame.BackgroundTransparency = 1
+        ToggleFrame.Parent = parent
+        
+        local Label = Instance.new("TextLabel")
+        Label.Name = "Label"
+        Label.Size = UDim2.new(1, -60, 1, 0)
+        Label.BackgroundTransparency = 1
+        Label.Text = text
+        Label.Font = Enum.Font.Gotham
+        Label.TextSize = 14
+        Label.TextColor3 = AdminSuite.Config.Theme.Text
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+        Label.Parent = ToggleFrame
+        
+        local ToggleBackground = Instance.new("Frame")
+        ToggleBackground.Name = "Background"
+        ToggleBackground.Size = UDim2.new(0, 44, 0, 24)
+        ToggleBackground.Position = UDim2.new(1, -44, 0.5, 0)
+        ToggleBackground.AnchorPoint = Vector2.new(0, 0.5)
+        ToggleBackground.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        ToggleBackground.Parent = ToggleFrame
+        
+        local ToggleCorner = Instance.new("UICorner")
+        ToggleCorner.CornerRadius = UDim.new(1, 0)
+        ToggleCorner.Parent = ToggleBackground
+        
+        local ToggleIndicator = Instance.new("Frame")
+        ToggleIndicator.Name = "Indicator"
+        ToggleIndicator.Size = UDim2.new(0, 18, 0, 18)
+        ToggleIndicator.Position = UDim2.new(0, 3, 0.5, 0)
+        ToggleIndicator.AnchorPoint = Vector2.new(0, 0.5)
+        ToggleIndicator.BackgroundColor3 = Color3.new(1, 1, 1)
+        ToggleIndicator.Parent = ToggleBackground
+        
+        local IndicatorCorner = Instance.new("UICorner")
+        IndicatorCorner.CornerRadius = UDim.new(1, 0)
+        IndicatorCorner.Parent = ToggleIndicator
+        
+        -- State
+        local enabled = default or false
+        
+        -- Update visual
+        local function updateToggle()
+            if enabled then
+                CreateTween(ToggleBackground, {BackgroundColor3 = AdminSuite.Config.Theme.Accent}, 0.2):Play()
+                CreateTween(ToggleIndicator, {Position = UDim2.new(0, 23, 0.5, 0)}, 0.2):Play()
+            else
+                CreateTween(ToggleBackground, {BackgroundColor3 = Color3.fromRGB(60, 60, 60)}, 0.2):Play()
+                CreateTween(ToggleIndicator, {Position = UDim2.new(0, 3, 0.5, 0)}, 0.2):Play()
             end
         end
+        
+        -- Initialize
+        updateToggle()
+        
+        -- Click handler
+        ToggleBackground.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                enabled = not enabled
+                updateToggle()
+                
+                if callback then
+                    callback(enabled)
+                end
+            end
+        end)
+        
+        -- Make label also clickable
+        Label.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                enabled = not enabled
+                updateToggle()
+                
+                if callback then
+                    callback(enabled)
+                end
+            end
+        end)
+        
+        return {
+            GetValue = function()
+                return enabled
+            end,
+            SetValue = function(value)
+                enabled = value
+                updateToggle()
+                if callback then
+                    callback(enabled)
+                end
+            end,
+            Toggle = function()
+                enabled = not enabled
+                updateToggle()
+                if callback then
+                    callback(enabled)
+                end
+            end
+        }
     end
     
-    -- clean up existing tracking data for this target
-    if tracker_data[target.UserId] then
-        if tracker_data[target.UserId].cleanup then
-            tracker_data[target.UserId].cleanup()
+    -- Method to add a slider
+    function self:AddSlider(parent, text, min, max, default, callback)
+        local SliderFrame = Instance.new("Frame")
+        SliderFrame.Name = "SliderFrame"
+        SliderFrame.Size = UDim2.new(1, 0, 0, 50)
+        SliderFrame.BackgroundTransparency = 1
+        SliderFrame.Parent = parent
+        
+        local Label = Instance.new("TextLabel")
+        Label.Name = "Label"
+        Label.Size = UDim2.new(1, 0, 0, 20)
+        Label.BackgroundTransparency = 1
+        Label.Text = text
+        Label.Font = Enum.Font.Gotham
+        Label.TextSize = 14
+        Label.TextColor3 = AdminSuite.Config.Theme.Text
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+        Label.Parent = SliderFrame
+        
+        local ValueLabel = Instance.new("TextLabel")
+        ValueLabel.Name = "Value"
+        ValueLabel.Size = UDim2.new(0, 50, 0, 20)
+        ValueLabel.Position = UDim2.new(1, -50, 0, 0)
+        ValueLabel.BackgroundTransparency = 1
+        ValueLabel.Font = Enum.Font.Gotham
+        ValueLabel.TextSize = 14
+        ValueLabel.TextColor3 = AdminSuite.Config.Theme.Accent
+        ValueLabel.TextXAlignment = Enum.TextXAlignment.Right
+        ValueLabel.Parent = SliderFrame
+        
+        local SliderBackground = Instance.new("Frame")
+        SliderBackground.Name = "Background"
+        SliderBackground.Size = UDim2.new(1, 0, 0, 8)
+        SliderBackground.Position = UDim2.new(0, 0, 0, 30)
+        SliderBackground.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        SliderBackground.Parent = SliderFrame
+        
+        local BackgroundCorner = Instance.new("UICorner")
+        BackgroundCorner.CornerRadius = UDim.new(1, 0)
+        BackgroundCorner.Parent = SliderBackground
+        
+        local SliderFill = Instance.new("Frame")
+        SliderFill.Name = "Fill"
+        SliderFill.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+        SliderFill.Size = UDim2.new(0, 0, 1, 0)
+        SliderFill.Parent = SliderBackground
+        
+        local FillCorner = Instance.new("UICorner")
+        FillCorner.CornerRadius = UDim.new(1, 0)
+        FillCorner.Parent = SliderFill
+        
+        local SliderButton = Instance.new("TextButton")
+        SliderButton.Name = "SliderButton"
+        SliderButton.Size = UDim2.new(0, 16, 0, 16)
+        SliderButton.Position = UDim2.new(0, 0, 0, 30)
+        SliderButton.AnchorPoint = Vector2.new(0.5, 0.5)
+        SliderButton.BackgroundColor3 = Color3.new(1, 1, 1)
+        SliderButton.Text = ""
+        SliderButton.Parent = SliderFrame
+        
+        local ButtonCorner = Instance.new("UICorner")
+        ButtonCorner.CornerRadius = UDim.new(1, 0)
+        ButtonCorner.Parent = SliderButton
+        
+        -- State
+        local value = default or min
+        local dragging = false
+        
+        -- Update visual
+        local function updateSlider()
+            local percent = (value - min) / (max - min)
+            SliderFill.Size = UDim2.new(percent, 0, 1, 0)
+            SliderButton.Position = UDim2.new(percent, 0, 0, 30)
+            ValueLabel.Text = tostring(math.floor(value * 100) / 100)
         end
-    end
-    
-    -- initialize tracking
-    local character = target.Character
-    if not character then
-        return "target has no character"
-    end
-    
-    local humanoid_root_part = character:FindFirstChild("HumanoidRootPart")
-    if not humanoid_root_part then
-        return "target has no HumanoidRootPart"
-    end
-    
-    local cleanup_funcs = {}
-    local path_positions = {}
-    local velocity_history = {}
-    local last_position = humanoid_root_part.Position
-    
-    -- create lasso
-    local lasso = Instance.new("SelectionBox") -- Changed from SelectionPartLasso to SelectionBox
-    lasso.Adornee = humanoid_root_part -- Changed from using Humanoid and Part to just Adornee
-    lasso.Visible = true
-    lasso.Color3 = options.color
-    lasso.LineThickness = 0.03
-    lasso.Transparency = 0.5
-    lasso.Parent = workspace
-    
-    table.insert(cleanup_funcs, function()
-        lasso:Destroy()
-    end)
-    
-    -- create path visualizer
-    local path_folder = Instance.new("Folder")
-    path_folder.Name = "TrackPath_" .. target.Name
-    path_folder.Parent = workspace
-    
-    table.insert(cleanup_funcs, function()
-        path_folder:Destroy()
-    end)
-    
-    -- create stats display
-    local billboard_gui = Instance.new("BillboardGui")
-    billboard_gui.Name = "TrackStats"
-    billboard_gui.AlwaysOnTop = true
-    billboard_gui.Size = UDim2.new(0, 200, 0, 100)
-    billboard_gui.StudsOffset = Vector3.new(0, 3, 0)
-    billboard_gui.Adornee = humanoid_root_part
-    billboard_gui.Parent = humanoid_root_part
-    
-    local stats_frame = Instance.new("Frame")
-    stats_frame.BackgroundTransparency = 0.5
-    stats_frame.BackgroundColor3 = Color3.new(0, 0, 0)
-    stats_frame.Size = UDim2.new(1, 0, 1, 0)
-    stats_frame.Parent = billboard_gui
-    
-    local stats_text = Instance.new("TextLabel")
-    stats_text.BackgroundTransparency = 1
-    stats_text.Size = UDim2.new(1, 0, 1, 0)
-    stats_text.TextColor3 = Color3.new(1, 1, 1)
-    stats_text.TextScaled = true
-    stats_text.Font = Enum.Font.Code
-    stats_text.Text = "Initializing..."
-    stats_text.Parent = stats_frame
-    
-    if not options.show_stats then
-        billboard_gui.Enabled = false
-    end
-    
-    table.insert(cleanup_funcs, function()
-        billboard_gui:Destroy()
-    end)
-    
-    -- trajectory prediction visualizer
-    local trajectory_part = Instance.new("Part")
-    trajectory_part.Name = "TrackTrajectory"
-    trajectory_part.Anchored = true
-    trajectory_part.CanCollide = false
-    trajectory_part.Transparency = 0.7
-    trajectory_part.Material = Enum.Material.Neon
-    trajectory_part.Color = options.color
-    trajectory_part.Shape = Enum.PartType.Ball
-    trajectory_part.Size = Vector3.new(0.5, 0.5, 0.5)
-    trajectory_part.Parent = workspace
-    
-    if not options.show_trajectory then
-        trajectory_part.Transparency = 1
-    end
-    
-    table.insert(cleanup_funcs, function()
-        trajectory_part:Destroy()
-    end)
-    
-    -- connection for movement tracking
-    local update_connection = run_service.Heartbeat:Connect(function(dt)
-        if not character or not character:FindFirstChild("HumanoidRootPart") or 
-           not character.Parent or not target.Parent then
-            -- Target is gone, clean up tracking
-            for _, func in ipairs(cleanup_funcs) do
-                func()
+        
+        -- Initialize
+        updateSlider()
+        
+        -- Input handlers
+        SliderButton.MouseButton1Down:Connect(function()
+            dragging = true
+        end)
+        
+        SliderBackground.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                
+                -- Calculate value from click position
+                local percentX = math.clamp((input.Position.X - SliderBackground.AbsolutePosition.X) / SliderBackground.AbsoluteSize.X, 0, 1)
+                value = min + (max - min) * percentX
+                
+                updateSlider()
+                
+                if callback then
+                    callback(value)
+                end
             end
-            if tracker_data[target.UserId] then
-                tracker_data[target.UserId] = nil
+        end)
+        
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
             end
+        end)
+        
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                -- Calculate value from mouse position
+                local percentX = math.clamp((input.Position.X - SliderBackground.AbsolutePosition.X) / SliderBackground.AbsoluteSize.X, 0, 1)
+                value = min + (max - min) * percentX
+                
+                updateSlider()
+                
+                if callback then
+                    callback(value)
+                end
+            end
+        end)
+        
+        return {
+            GetValue = function()
+                return value
+            end,
+            SetValue = function(newValue)
+                value = math.clamp(newValue, min, max)
+                updateSlider()
+                if callback then
+                    callback(value)
+                end
+            end,
+            SetLimits = function(newMin, newMax)
+                min = newMin
+                max = newMax
+                value = math.clamp(value, min, max)
+                updateSlider()
+                if callback then
+                    callback(value)
+                end
+            end
+        }
+    end
+    
+    -- Method to add a textbox
+    function self:AddTextBox(parent, text, placeholder, default, callback)
+        local TextBoxFrame = Instance.new("Frame")
+        TextBoxFrame.Name = "TextBoxFrame"
+        TextBoxFrame.Size = UDim2.new(1, 0, 0, 50)
+        TextBoxFrame.BackgroundTransparency = 1
+        TextBoxFrame.Parent = parent
+        
+        local Label = Instance.new("TextLabel")
+        Label.Name = "Label"
+        Label.Size = UDim2.new(1, 0, 0, 20)
+        Label.BackgroundTransparency = 1
+        Label.Text = text
+        Label.Font = Enum.Font.Gotham
+        Label.TextSize = 14
+        Label.TextColor3 = AdminSuite.Config.Theme.Text
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+        Label.Parent = TextBoxFrame
+        
+        local TextBoxContainer = Instance.new("Frame")
+        TextBoxContainer.Name = "Container"
+        TextBoxContainer.Size = UDim2.new(1, 0, 0, 30)
+        TextBoxContainer.Position = UDim2.new(0, 0, 0, 20)
+        TextBoxContainer.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        TextBoxContainer.Parent = TextBoxFrame
+        
+        local ContainerCorner = Instance.new("UICorner")
+        ContainerCorner.CornerRadius = UDim.new(0, 6)
+        ContainerCorner.Parent = TextBoxContainer
+        
+        local TextBox = Instance.new("TextBox")
+        TextBox.Name = "TextBox"
+        TextBox.Size = UDim2.new(1, -12, 1, 0)
+        TextBox.Position = UDim2.new(0, 6, 0, 0)
+        TextBox.BackgroundTransparency = 1
+        TextBox.Text = default or ""
+        TextBox.PlaceholderText = placeholder or ""
+        TextBox.Font = Enum.Font.Gotham
+        TextBox.TextSize = 14
+        TextBox.TextColor3 = AdminSuite.Config.Theme.Text
+        TextBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+        TextBox.ClearTextOnFocus = false
+        TextBox.Parent = TextBoxContainer
+        
+        -- Focus effects
+        TextBox.Focused:Connect(function()
+            CreateTween(TextBoxContainer, {BackgroundColor3 = Color3.fromRGB(80, 80, 100)}, 0.2):Play()
+        end)
+        
+        TextBox.FocusLost:Connect(function(enterPressed)
+            CreateTween(TextBoxContainer, {BackgroundColor3 = Color3.fromRGB(60, 60, 60)}, 0.2):Play()
+            
+            if enterPressed and callback then
+                callback(TextBox.Text)
+            end
+        end)
+        
+        return {
+            GetText = function()
+                return TextBox.Text
+            end,
+            SetText = function(newText)
+                TextBox.Text = newText
+                if callback then
+                    callback(newText)
+                end
+            end,
+            OnChange = function(newCallback)
+                TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+                    newCallback(TextBox.Text)
+                end)
+            end
+        }
+    end
+    
+    -- Method to add a dropdown
+    function self:AddDropdown(parent, text, options, default, callback)
+        local DropdownFrame = Instance.new("Frame")
+        DropdownFrame.Name = "DropdownFrame"
+        DropdownFrame.Size = UDim2.new(1, 0, 0, 50)
+        DropdownFrame.BackgroundTransparency = 1
+        DropdownFrame.ClipsDescendants = true
+        DropdownFrame.Parent = parent
+        
+        local Label = Instance.new("TextLabel")
+        Label.Name = "Label"
+        Label.Size = UDim2.new(1, 0, 0, 20)
+        Label.BackgroundTransparency = 1
+        Label.Text = text
+        Label.Font = Enum.Font.Gotham
+        Label.TextSize = 14
+        Label.TextColor3 = AdminSuite.Config.Theme.Text
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+        Label.Parent = DropdownFrame
+        
+        local DropdownButton = Instance.new("TextButton")
+        DropdownButton.Name = "Button"
+        DropdownButton.Size = UDim2.new(1, 0, 0, 30)
+        DropdownButton.Position = UDim2.new(0, 0, 0, 20)
+        DropdownButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        DropdownButton.Text = default or "Select..."
+        DropdownButton.Font = Enum.Font.Gotham
+        DropdownButton.TextSize = 14
+        DropdownButton.TextColor3 = AdminSuite.Config.Theme.Text
+        DropdownButton.TextXAlignment = Enum.TextXAlignment.Left
+        DropdownButton.TextTruncate = Enum.TextTruncate.AtEnd
+        DropdownButton.Parent = DropdownFrame
+        
+        local ButtonPadding = Instance.new("UIPadding")
+        ButtonPadding.PaddingLeft = UDim.new(0, 10)
+        ButtonPadding.Parent = DropdownButton
+        
+        local ButtonCorner = Instance.new("UICorner")
+        ButtonCorner.CornerRadius = UDim.new(0, 6)
+        ButtonCorner.Parent = DropdownButton
+        
+        local ArrowIcon = Instance.new("TextLabel")
+        ArrowIcon.Name = "Arrow"
+        ArrowIcon.Size = UDim2.new(0, 20, 0, 20)
+        ArrowIcon.Position = UDim2.new(1, -25, 0.5, 0)
+        ArrowIcon.AnchorPoint = Vector2.new(0, 0.5)
+        ArrowIcon.BackgroundTransparency = 1
+        ArrowIcon.Text = "▼"
+        ArrowIcon.Font = Enum.Font.Gotham
+        ArrowIcon.TextSize = 14
+        ArrowIcon.TextColor3 = AdminSuite.Config.Theme.Text
+        ArrowIcon.Parent = DropdownButton
+        
+        local OptionContainer = Instance.new("Frame")
+        OptionContainer.Name = "OptionContainer"
+        OptionContainer.Size = UDim2.new(1, 0, 0, 0)
+        OptionContainer.Position = UDim2.new(0, 0, 0, 50)
+        OptionContainer.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        OptionContainer.ZIndex = 2
+        OptionContainer.Visible = false
+        OptionContainer.Parent = DropdownFrame
+        
+        local ContainerCorner = Instance.new("UICorner")
+        ContainerCorner.CornerRadius = UDim.new(0, 6)
+        ContainerCorner.Parent = OptionContainer
+        
+        local OptionList = Instance.new("UIListLayout")
+        OptionList.SortOrder = Enum.SortOrder.LayoutOrder
+        OptionList.Parent = OptionContainer
+        
+        -- State
+        local selected = default
+        local open = false
+        
+        -- Create options
+        local function createOptions()
+            -- Clear existing options
+            for _, child in pairs(OptionContainer:GetChildren()) do
+                if child:IsA("TextButton") then
+                    child:Destroy()
+                end
+            end
+            
+            -- Create new options
+            for i, option in ipairs(options) do
+                local OptionButton = Instance.new("TextButton")
+                OptionButton.Name = "Option_" .. i
+                OptionButton.Size = UDim2.new(1, 0, 0, 30)
+                OptionButton.BackgroundTransparency = 1
+                OptionButton.Text = option
+                OptionButton.Font = Enum.Font.Gotham
+                OptionButton.TextSize = 14
+                OptionButton.TextColor3 = AdminSuite.Config.Theme.Text
+                OptionButton.TextXAlignment = Enum.TextXAlignment.Left
+                OptionButton.ZIndex = 3
+                OptionButton.Parent = OptionContainer
+                
+                local OptionPadding = Instance.new("UIPadding")
+                OptionPadding.PaddingLeft = UDim.new(0, 10)
+                OptionPadding.Parent = OptionButton
+                
+                -- Click handler
+                OptionButton.MouseButton1Click:Connect(function()
+                    selected = option
+                    DropdownButton.Text = option
+                    
+                    -- Close dropdown
+                    open = false
+                    OptionContainer.Visible = false
+                    CreateTween(ArrowIcon, {Rotation = 0}, 0.2):Play()
+                    CreateTween(DropdownFrame, {Size = UDim2.new(1, 0, 0, 50)}, 0.2):Play()
+                    
+                    if callback then
+                        callback(option)
+                    end
+                end)
+                
+                -- Hover effect
+                OptionButton.MouseEnter:Connect(function()
+                    CreateTween(OptionButton, {BackgroundTransparency = 0.8}, 0.1):Play()
+                end)
+                
+                OptionButton.MouseLeave:Connect(function()
+                    CreateTween(OptionButton, {BackgroundTransparency = 1}, 0.1):Play()
+                end)
+            end
+        end
+        
+        -- Initialize options
+        createOptions()
+        
+        -- Toggle dropdown
+        DropdownButton.MouseButton1Click:Connect(function()
+            open = not open
+            
+            if open then
+                -- Open dropdown
+                OptionContainer.Visible = true
+                local contentHeight = OptionList.AbsoluteContentSize.Y
+                local targetHeight = math.min(contentHeight, 150) -- Max height of dropdown
+                
+                CreateTween(ArrowIcon, {Rotation = 180}, 0.2):Play()
+                CreateTween(DropdownFrame, {Size = UDim2.new(1, 0, 0, 50 + targetHeight)}, 0.2):Play()
+                CreateTween(OptionContainer, {Size = UDim2.new(1, 0, 0, targetHeight)}, 0.2):Play()
+            else
+                -- Close dropdown
+                CreateTween(ArrowIcon, {Rotation = 0}, 0.2):Play()
+                CreateTween(DropdownFrame, {Size = UDim2.new(1, 0, 0, 50)}, 0.2):Play()
+                
+                task.delay(0.2, function()
+                    if not open then
+                        OptionContainer.Visible = false
+                    end
+                end)
+            end
+        end)
+        
+        return {
+            GetSelected = function()
+                return selected
+            end,
+            SetOptions = function(newOptions)
+                options = newOptions
+                createOptions()
+            end,
+            SetSelected = function(option)
+                if table.find(options, option) then
+                    selected = option
+                    DropdownButton.Text = option
+                    
+                    if callback then
+                        callback(option)
+                    end
+                end
+            end
+        }
+    end
+    
+    -- Method to add a color picker
+    function self:AddColorPicker(parent, text, default, callback)
+        local ColorPickerFrame = Instance.new("Frame")
+        ColorPickerFrame.Name = "ColorPickerFrame"
+        ColorPickerFrame.Size = UDim2.new(1, 0, 0, 50)
+        ColorPickerFrame.BackgroundTransparency = 1
+        ColorPickerFrame.Parent = parent
+        
+        local Label = Instance.new("TextLabel")
+        Label.Name = "Label"
+        Label.Size = UDim2.new(1, -60, 1, 0)
+        Label.BackgroundTransparency = 1
+        Label.Text = text
+        Label.Font = Enum.Font.Gotham
+        Label.TextSize = 14
+        Label.TextColor3 = AdminSuite.Config.Theme.Text
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+        Label.Parent = ColorPickerFrame
+        
+        local ColorDisplay = Instance.new("TextButton")
+        ColorDisplay.Name = "ColorDisplay"
+        ColorDisplay.Size = UDim2.new(0, 40, 0, 40)
+        ColorDisplay.Position = UDim2.new(1, -40, 0.5, 0)
+        ColorDisplay.AnchorPoint = Vector2.new(0, 0.5)
+        ColorDisplay.BackgroundColor3 = default or Color3.new(1, 1, 1)
+        ColorDisplay.Text = ""
+        ColorDisplay.Parent = ColorPickerFrame
+        
+        local DisplayCorner = Instance.new("UICorner")
+        DisplayCorner.CornerRadius = UDim.new(0, 8)
+        DisplayCorner.Parent = ColorDisplay
+        
+        -- Create detailed color picker panel
+        local PickerPanel = Instance.new("Frame")
+        PickerPanel.Name = "PickerPanel"
+        PickerPanel.Size = UDim2.new(0, 200, 0, 220)
+        PickerPanel.Position = UDim2.new(1, -200, 0, 50)
+        PickerPanel.BackgroundColor3 = AdminSuite.Config.Theme.Secondary
+        PickerPanel.BorderSizePixel = 0
+        PickerPanel.Visible = false
+        PickerPanel.ZIndex = 10
+        PickerPanel.Parent = ColorPickerFrame
+        
+        local PanelCorner = Instance.new("UICorner")
+        PanelCorner.CornerRadius = UDim.new(0, 8)
+        PanelCorner.Parent = PickerPanel
+        
+        -- Color picker implementation is simplified here
+        -- In a full implementation, you would include:
+        -- 1. A hue slider
+        -- 2. A saturation/value selector
+        -- 3. RGB inputs
+        -- 4. Hex input
+        
+        -- For brevity, we'll just include a simplified version with RGB sliders
+        
+        local RSlider = Instance.new("Frame")
+        RSlider.Name = "RSlider"
+        RSlider.Size = UDim2.new(1, -20, 0, 30)
+        RSlider.Position = UDim2.new(0, 10, 0, 10)
+        RSlider.BackgroundTransparency = 1
+        RSlider.ZIndex = 11
+        RSlider.Parent = PickerPanel
+        
+        local RLabel = Instance.new("TextLabel")
+        RLabel.Name = "RLabel"
+        RLabel.Size = UDim2.new(0, 20, 1, 0)
+        RLabel.BackgroundTransparency = 1
+        RLabel.Text = "R:"
+        RLabel.Font = Enum.Font.Gotham
+        RLabel.TextSize = 14
+        RLabel.TextColor3 = Color3.new(1, 0, 0)
+        RLabel.ZIndex = 11
+        RLabel.Parent = RSlider
+        
+        local R = self:AddSlider(RSlider, "", 0, 255, default and math.floor(default.R * 255) or 255, function(value)
+            local current = ColorDisplay.BackgroundColor3
+            ColorDisplay.BackgroundColor3 = Color3.fromRGB(value, current.G * 255, current.B * 255)
+            
+            if callback then
+                callback(ColorDisplay.BackgroundColor3)
+            end
+        end)
+        
+        local GSlider = Instance.new("Frame")
+        GSlider.Name = "GSlider"
+        GSlider.Size = UDim2.new(1, -20, 0, 30)
+        GSlider.Position = UDim2.new(0, 10, 0, 50)
+        GSlider.BackgroundTransparency = 1
+        GSlider.ZIndex = 11
+        GSlider.Parent = PickerPanel
+        
+        local GLabel = Instance.new("TextLabel")
+        GLabel.Name = "GLabel"
+        GLabel.Size = UDim2.new(0, 20, 1, 0)
+        GLabel.BackgroundTransparency = 1
+        GLabel.Text = "G:"
+        GLabel.Font = Enum.Font.Gotham
+        GLabel.TextSize = 14
+        GLabel.TextColor3 = Color3.new(0, 1, 0)
+        GLabel.ZIndex = 11
+        GLabel.Parent = GSlider
+        
+        local G = self:AddSlider(GSlider, "", 0, 255, default and math.floor(default.G * 255) or 255, function(value)
+            local current = ColorDisplay.BackgroundColor3
+            ColorDisplay.BackgroundColor3 = Color3.fromRGB(current.R * 255, value, current.B * 255)
+            
+            if callback then
+                callback(ColorDisplay.BackgroundColor3)
+            end
+        end)
+        
+        local BSlider = Instance.new("Frame")
+        BSlider.Name = "BSlider"
+        BSlider.Size = UDim2.new(1, -20, 0, 30)
+        BSlider.Position = UDim2.new(0, 10, 0, 90)
+        BSlider.BackgroundTransparency = 1
+        BSlider.ZIndex = 11
+        BSlider.Parent = PickerPanel
+        
+        local BLabel = Instance.new("TextLabel")
+        BLabel.Name = "BLabel"
+        BLabel.Size = UDim2.new(0, 20, 1, 0)
+        BLabel.BackgroundTransparency = 1
+        BLabel.Text = "B:"
+        BLabel.Font = Enum.Font.Gotham
+        BLabel.TextSize = 14
+        BLabel.TextColor3 = Color3.new(0, 0, 1)
+        BLabel.ZIndex = 11
+        BLabel.Parent = BSlider
+        
+        local B = self:AddSlider(BSlider, "", 0, 255, default and math.floor(default.B * 255) or 255, function(value)
+            local current = ColorDisplay.BackgroundColor3
+            ColorDisplay.BackgroundColor3 = Color3.fromRGB(current.R * 255, current.G * 255, value)
+            
+            if callback then
+                callback(ColorDisplay.BackgroundColor3)
+            end
+        end)
+        
+        -- Apply button
+        local ApplyButton = Instance.new("TextButton")
+        ApplyButton.Name = "ApplyButton"
+        ApplyButton.Size = UDim2.new(1, -20, 0, 30)
+        ApplyButton.Position = UDim2.new(0, 10, 1, -40)
+        ApplyButton.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+        ApplyButton.Text = "Apply"
+        ApplyButton.Font = Enum.Font.GothamBold
+        ApplyButton.TextSize = 14
+        ApplyButton.TextColor3 = Color3.new(1, 1, 1)
+        ApplyButton.ZIndex = 11
+        ApplyButton.Parent = PickerPanel
+        
+        local ApplyCorner = Instance.new("UICorner")
+        ApplyCorner.CornerRadius = UDim.new(0, 6)
+        ApplyCorner.Parent = ApplyButton
+        
+        ApplyButton.MouseButton1Click:Connect(function()
+            PickerPanel.Visible = false
+            
+            if callback then
+                callback(ColorDisplay.BackgroundColor3)
+            end
+        end)
+        
+        -- Toggle color picker panel
+        ColorDisplay.MouseButton1Click:Connect(function()
+            PickerPanel.Visible = not PickerPanel.Visible
+        end)
+        
+        return {
+            GetColor = function()
+                return ColorDisplay.BackgroundColor3
+            end,
+            SetColor = function(color)
+                ColorDisplay.BackgroundColor3 = color
+                R.SetValue(color.R * 255)
+                G.SetValue(color.G * 255)
+                B.SetValue(color.B * 255)
+                
+                if callback then
+                    callback(color)
+                end
+            end
+        }
+    end
+    
+    -- Method to add a label
+    function self:AddLabel(parent, text)
+        local LabelFrame = Instance.new("Frame")
+        LabelFrame.Name = "LabelFrame"
+        LabelFrame.Size = UDim2.new(1, 0, 0, 30)
+        LabelFrame.BackgroundTransparency = 1
+        LabelFrame.Parent = parent
+        
+        local Label = Instance.new("TextLabel")
+        Label.Name = "Label"
+        Label.Size = UDim2.new(1, 0, 1, 0)
+        Label.BackgroundTransparency = 1
+        Label.Text = text
+        Label.Font = Enum.Font.Gotham
+        Label.TextSize = 14
+        Label.TextColor3 = AdminSuite.Config.Theme.Text
+        Label.TextXAlignment = Enum.TextXAlignment.Left
+        Label.TextWrapped = true
+        Label.Parent = LabelFrame
+        
+        return {
+            SetText = function(newText)
+                Label.Text = newText
+            end
+        }
+    end
+    
+    -- Command execution logic
+    function self:UpdateSuggestions(input)
+        -- Clear existing suggestions
+        for _, child in pairs(SuggestionsScroll:GetChildren()) do
+            if child:IsA("TextButton") then
+                child:Destroy()
+            end
+        end
+        
+        if #input == 0 then
+            SuggestionsFrame.Visible = false
+            SuggestionIndex = 0
             return
         end
         
-        local current_position = humanoid_root_part.Position
-        local velocity = (current_position - last_position) / dt
-        last_position = current_position
-        
-        -- Calculate acceleration
-        table.insert(velocity_history, velocity)
-        if #velocity_history > 10 then
-            table.remove(velocity_history, 1)
+        -- Find matching commands
+        local matches = {}
+        for _, cmd in pairs(AdminSuite.Commands) do
+            if cmd.Name:lower():find(input:lower(), 1, true) then
+                table.insert(matches, cmd)
+            end
         end
         
-        local avg_velocity = Vector3.new(0, 0, 0)
-        local acceleration = Vector3.new(0, 0, 0)
+        CommandSuggestions = matches
         
-        if #velocity_history >= 2 then
-            avg_velocity = velocity_history[#velocity_history]
-            local prev_velocity = velocity_history[#velocity_history-1]
-            acceleration = (avg_velocity - prev_velocity) / dt
+        if #matches == 0 then
+            SuggestionsFrame.Visible = false
+            SuggestionIndex = 0
+            return
         end
         
-        -- Update stats display
-        if options.show_stats then
-            local speed = velocity.Magnitude
-            local height = current_position.Y
-            local direction
+        -- Sort matches by relevance
+        table.sort(matches, function(a, b)
+            local aStart = a.Name:lower():find(input:lower(), 1, true) or 999
+            local bStart = b.Name:lower():find(input:lower(), 1, true) or 999
+            if aStart == bStart then
+                return a.Name < b.Name
+            end
+            return aStart < bStart
+        end)
+        
+        -- Create suggestion buttons
+        for i, cmd in ipairs(matches) do
+            local SuggestionButton = Instance.new("TextButton")
+            SuggestionButton.Name = "Suggestion_" .. i
+            SuggestionButton.Size = UDim2.new(1, 0, 0, 30)
+            SuggestionButton.BackgroundTransparency = 1
+            SuggestionButton.Text = cmd.Name
+            SuggestionButton.Font = Enum.Font.Gotham
+            SuggestionButton.TextSize = 14
+            SuggestionButton.TextColor3 = AdminSuite.Config.Theme.Text
+            SuggestionButton.TextXAlignment = Enum.TextXAlignment.Left
+            SuggestionButton.ZIndex = 6
+            SuggestionButton.Parent = SuggestionsScroll
             
-            if velocity.Magnitude > 0.1 then
-                direction = velocity.Unit
+            local DescriptionLabel = Instance.new("TextLabel")
+            DescriptionLabel.Name = "Description"
+            DescriptionLabel.Size = UDim2.new(0.6, 0, 1, 0)
+            DescriptionLabel.Position = UDim2.new(0.4, 0, 0, 0)
+            DescriptionLabel.BackgroundTransparency = 1
+            DescriptionLabel.Text = cmd.Description or ""
+            DescriptionLabel.Font = Enum.Font.Gotham
+            DescriptionLabel.TextSize = 12
+            DescriptionLabel.TextColor3 = AdminSuite.Config.Theme.TextDark
+            DescriptionLabel.TextXAlignment = Enum.TextXAlignment.Left
+            DescriptionLabel.TextTruncate = Enum.TextTruncate.AtEnd
+            DescriptionLabel.ZIndex = 6
+            DescriptionLabel.Parent = SuggestionButton
+            
+            -- Padding
+            local ButtonPadding = Instance.new("UIPadding")
+            ButtonPadding.PaddingLeft = UDim.new(0, 10)
+            ButtonPadding.Parent = SuggestionButton
+            
+            -- Hover effect
+            SuggestionButton.MouseEnter:Connect(function()
+                SuggestionButton.BackgroundTransparency = 0.8
+                SuggestionButton.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+            end)
+            
+            SuggestionButton.MouseLeave:Connect(function()
+                if SuggestionIndex ~= i then
+                    SuggestionButton.BackgroundTransparency = 1
+                end
+            end)
+            
+            -- Click handler
+            SuggestionButton.MouseButton1Click:Connect(function()
+                CommandInput.Text = cmd.Name
+                CommandInput:CaptureFocus()
+                SuggestionsFrame.Visible = false
+            end)
+        end
+        
+        -- Show suggestions
+        SuggestionIndex = 0
+        SuggestionsFrame.Size = UDim2.new(1, 0, 0, math.min(#matches * 30, 200))
+        SuggestionsScroll.CanvasSize = UDim2.new(0, 0, 0, #matches * 30)
+        SuggestionsFrame.Visible = true
+    end
+    
+    function self:ExecuteCommand(command)
+        -- Extract command and arguments
+        local args = {}
+        for arg in command:gmatch("%S+") do
+            table.insert(args, arg)
+        end
+        
+        local cmdName = table.remove(args, 1)
+        
+        -- Find matching command
+        for _, cmd in pairs(AdminSuite.Commands) do
+            if cmd.Name:lower() == cmdName:lower() then
+                -- Add to analytics
+                AdminSuite.Analytics.CommandUsage[cmd.Name] = (AdminSuite.Analytics.CommandUsage[cmd.Name] or 0) + 1
+                
+                -- Execute command
+                local success, result = pcall(function()
+                    return cmd.Execute(unpack(args))
+                end)
+                
+                if not success then
+                    -- Show error
+                    self:ShowNotification("Error", "Failed to execute command: " .. result, "error")
+                elseif result then
+                    -- Show result notification if command returned a message
+                    self:ShowNotification("Command", result, "info")
+                end
+                
+                return
+            end
+        end
+        
+        -- Command not found
+        self:ShowNotification("Error", "Command not found: " .. cmdName, "error")
+    end
+    
+    -- Method to show notification
+    function self:ShowNotification(title, message, type)
+        local NotifFrame = Instance.new("Frame")
+        NotifFrame.Name = "Notification"
+        NotifFrame.Size = UDim2.new(0, 300, 0, 80)
+        NotifFrame.Position = UDim2.new(1, 20, 0.8, 0)
+        NotifFrame.BackgroundColor3 = AdminSuite.Config.Theme.Secondary
+        NotifFrame.BorderSizePixel = 0
+        NotifFrame.AnchorPoint = Vector2.new(1, 0.8)
+        NotifFrame.Parent = ScreenGui
+        
+        local NotifCorner = Instance.new("UICorner")
+        NotifCorner.CornerRadius = UDim.new(0, 8)
+        NotifCorner.Parent = NotifFrame
+        
+        local NotifTitle = Instance.new("TextLabel")
+        NotifTitle.Name = "Title"
+        NotifTitle.Size = UDim2.new(1, -20, 0, 30)
+        NotifTitle.Position = UDim2.new(0, 10, 0, 5)
+        NotifTitle.BackgroundTransparency = 1
+        NotifTitle.Text = title
+        NotifTitle.Font = Enum.Font.GothamBold
+        NotifTitle.TextSize = 16
+        NotifTitle.TextColor3 = AdminSuite.Config.Theme.Text
+        NotifTitle.TextXAlignment = Enum.TextXAlignment.Left
+        NotifTitle.Parent = NotifFrame
+        
+        local NotifMessage = Instance.new("TextLabel")
+        NotifMessage.Name = "Message"
+        NotifMessage.Size = UDim2.new(1, -20, 0, 40)
+        NotifMessage.Position = UDim2.new(0, 10, 0, 35)
+        NotifMessage.BackgroundTransparency = 1
+        NotifMessage.Text = message
+        NotifMessage.Font = Enum.Font.Gotham
+        NotifMessage.TextSize = 14
+        NotifMessage.TextColor3 = AdminSuite.Config.Theme.TextDark
+        NotifMessage.TextXAlignment = Enum.TextXAlignment.Left
+        NotifMessage.TextWrapped = true
+        NotifMessage.Parent = NotifFrame
+        
+        -- Color based on type
+        if type == "error" then
+            local ColorBar = Instance.new("Frame")
+            ColorBar.Name = "ColorBar"
+            ColorBar.Size = UDim2.new(0, 5, 1, 0)
+            ColorBar.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+            ColorBar.Parent = NotifFrame
+            
+            local BarCorner = Instance.new("UICorner")
+            BarCorner.CornerRadius = UDim.new(0, 8)
+            BarCorner.Parent = ColorBar
+        elseif type == "success" then
+            local ColorBar = Instance.new("Frame")
+            ColorBar.Name = "ColorBar"
+            ColorBar.Size = UDim2.new(0, 5, 1, 0)
+            ColorBar.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
+            ColorBar.Parent = NotifFrame
+            
+            local BarCorner = Instance.new("UICorner")
+            BarCorner.CornerRadius = UDim.new(0, 8)
+            BarCorner.Parent = ColorBar
+        elseif type == "info" then
+            local ColorBar = Instance.new("Frame")
+            ColorBar.Name = "ColorBar"
+            ColorBar.Size = UDim2.new(0, 5, 1, 0)
+            ColorBar.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+            ColorBar.Parent = NotifFrame
+            
+            local BarCorner = Instance.new("UICorner")
+            BarCorner.CornerRadius = UDim.new(0, 8)
+            BarCorner.Parent = ColorBar
+        end
+        
+        -- Animation
+        CreateTween(NotifFrame, {Position = UDim2.new(1, -20, 0.8, 0)}, 0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out):Play()
+        
+        -- Auto close
+        task.delay(5, function()
+            CreateTween(NotifFrame, {Position = UDim2.new(1, 320, 0.8, 0)}, 0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In):Play()
+            task.delay(0.3, function()
+                NotifFrame:Destroy()
+            end)
+        end)
+    end
+    
+    -- Setup input handling for toggling UI
+    local function setupInputHandling()
+        UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+            
+            if input.KeyCode == Enum.KeyCode.Quote then
+                -- Toggle main menu
+                MenuVisible = not MenuVisible
+                
+                if MenuVisible then
+                    MainContainer.Position = UDim2.new(-0.5, 0, 0.5, -200)
+                    MainContainer.Visible = true
+                    local tween = CreateTween(MainContainer, {Position = UDim2.new(0.5, -300, 0.5, -200)}, 0.3)
+                    tween:Play()
+                else
+                    local tween = CreateTween(MainContainer, {Position = UDim2.new(-0.5, 0, 0.5, -200)}, 0.3)
+                    tween:Play()
+                    tween.Completed:Connect(function()
+                        MainContainer.Visible = false
+                    end)
+                end
+            elseif input.KeyCode == Enum.KeyCode.Semicolon then
+                -- Toggle command bar
+                CommandBarVisible = not CommandBarVisible
+                
+                if CommandBarVisible then
+                    CommandBarFrame.Position = UDim2.new(0.5, 0, 0.7, 0)
+                    CommandBarFrame.Visible = true
+                    local tween = CreateTween(CommandBarFrame, {Position = AdminSuite.Config.CommandBarPosition}, 0.3)
+                    tween:Play()
+                    task.delay(0.1, function()
+                        CommandInput:CaptureFocus()
+                    end)
+                else
+                    SuggestionsFrame.Visible = false
+                    local tween = CreateTween(CommandBarFrame, {Position = UDim2.new(0.5, 0, 0.7, 0)}, 0.3)
+                    tween:Play()
+                    tween.Completed:Connect(function()
+                        CommandBarFrame.Visible = false
+                    end)
+                end
+            end
+        end)
+        
+        -- Input handling for command bar
+        UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if not CommandInput:IsFocused() then return end
+            
+            if input.KeyCode == Enum.KeyCode.Up then
+                -- Navigate history
+                if #CommandHistory > 0 then
+                    HistoryIndex = math.min(HistoryIndex + 1, #CommandHistory)
+                    CommandInput.Text = CommandHistory[HistoryIndex]
+                    CommandInput.CursorPosition = #CommandInput.Text + 1
+                end
+            elseif input.KeyCode == Enum.KeyCode.Down then
+                -- Navigate history
+                if HistoryIndex > 1 then
+                    HistoryIndex = HistoryIndex - 1
+                    CommandInput.Text = CommandHistory[HistoryIndex]
+                    CommandInput.CursorPosition = #CommandInput.Text + 1
+                elseif HistoryIndex == 1 then
+                    HistoryIndex = 0
+                    CommandInput.Text = ""
+                end
+            elseif input.KeyCode == Enum.KeyCode.Tab then
+                -- Tab completion
+                if SuggestionsFrame.Visible and #CommandSuggestions > 0 then
+                    if SuggestionIndex == 0 then
+                        SuggestionIndex = 1
+                    else
+                        SuggestionIndex = (SuggestionIndex % #CommandSuggestions) + 1
+                    end
+                    
+                    -- Update visuals
+                    for i, child in ipairs(SuggestionsScroll:GetChildren()) do
+                        if child:IsA("TextButton") then
+                            if i == SuggestionIndex then
+                                child.BackgroundTransparency = 0.8
+                                child.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+                            else
+                                child.BackgroundTransparency = 1
+                            end
+                        end
+                    end
+                    
+                    -- Apply suggestion
+                    CommandInput.Text = CommandSuggestions[SuggestionIndex].Name
+                    CommandInput.CursorPosition = #CommandInput.Text + 1
+                end
+            end
+        end)
+    end
+    
+    -- Initialize
+    setupInputHandling()
+    
+    -- Return interface
+    return {
+        AddTab = function(name, icon, order)
+            return self:AddTab(name, icon, order)
+        end,
+        ShowNotification = function(title, message, type)
+            self:ShowNotification(title, message, type)
+        end,
+        UpdateSuggestions = function(input)
+            self:UpdateSuggestions(input)
+        end,
+        ExecuteCommand = function(command)
+            self:ExecuteCommand(command)
+        end,
+        SetVisible = function(visible)
+            MenuVisible = visible
+            MainContainer.Visible = visible
+        end,
+        IsVisible = function()
+            return MenuVisible
+        end,
+        ToggleCommandBar = function(visible)
+            CommandBarVisible = visible ~= nil and visible or not CommandBarVisible
+            
+            if CommandBarVisible then
+                CommandBarFrame.Position = UDim2.new(0.5, 0, 0.7, 0)
+                CommandBarFrame.Visible = true
+                local tween = CreateTween(CommandBarFrame, {Position = AdminSuite.Config.CommandBarPosition}, 0.3)
+                tween:Play()
+                task.delay(0.1, function()
+                    CommandInput:CaptureFocus()
+                end)
             else
-                direction = Vector3.new(0, 0, 0)
-            end
-            
-            -- Get the humanoid state
-            local humanoid = character:FindFirstChildOfClass("Humanoid")
-            local state = "Unknown"
-            if humanoid then
-                local state_names = {
-                    [Enum.HumanoidStateType.FallingDown] = "Falling",
-                    [Enum.HumanoidStateType.Running] = "Running",
-                    [Enum.HumanoidStateType.Climbing] = "Climbing",
-                    [Enum.HumanoidStateType.Jumping] = "Jumping",
-                    [Enum.HumanoidStateType.Swimming] = "Swimming",
-                    [Enum.HumanoidStateType.Seated] = "Seated",
-                    [Enum.HumanoidStateType.Dead] = "Dead",
-                    [Enum.HumanoidStateType.Flying] = "Flying",
-                    [Enum.HumanoidStateType.Landed] = "Landed",
-                    [Enum.HumanoidStateType.GettingUp] = "Getting Up",
-                    [Enum.HumanoidStateType.Ragdoll] = "Ragdolled",
-                    [Enum.HumanoidStateType.StrafingNoPhysics] = "Strafing",
-                    [Enum.HumanoidStateType.Physics] = "Physics"
-                }
-                state = state_names[humanoid:GetState()] or "Unknown"
-            end
-            
-            local stats = string.format(
-                "Player: %s\nSpeed: %.2f studs/s\nHeight: %.2f\nAccel: %.2f s/s²\nState: %s\nHealth: %.0f\nDir: %.1f, %.1f, %.1f",
-                target.Name,
-                speed,
-                height,
-                acceleration.Magnitude,
-                state,
-                humanoid and humanoid.Health or 0,
-                direction.X, direction.Y, direction.Z
-            )
-            
-            stats_text.Text = stats
-        end
-        
-        -- Update path visualization
-        if options.show_path then
-            table.insert(path_positions, current_position)
-            if #path_positions > options.path_length then
-                table.remove(path_positions, 1)
-            end
-            
-            -- Clear previous path
-            path_folder:ClearAllChildren()
-            
-            -- Draw new path
-            for i = 2, #path_positions do
-                local segment = Instance.new("Part")
-                segment.Anchored = true
-                segment.CanCollide = false
-                segment.Transparency = 0.5
-                segment.Material = Enum.Material.Neon
-                segment.Color = options.color
-                segment.Name = "PathSegment"
-                
-                local start_pos = path_positions[i-1]
-                local end_pos = path_positions[i]
-                local direction = (end_pos - start_pos).Unit
-                local distance = (end_pos - start_pos).Magnitude
-                
-                segment.Size = Vector3.new(0.2, 0.2, distance)
-                segment.CFrame = CFrame.new(start_pos:Lerp(end_pos, 0.5), end_pos)
-                segment.Parent = path_folder
-                
-                -- Fade transparency based on age
-                local alpha = (i-1) / #path_positions
-                segment.Transparency = 0.5 + (alpha * 0.5)
-            end
-        end
-        
-        -- Update trajectory prediction
-        if options.show_trajectory then
-            local predicted_position = current_position + (velocity * 2)
-            trajectory_part.Position = predicted_position
-        end
-    end)
-    
-    table.insert(cleanup_funcs, function()
-        if update_connection then
-            update_connection:Disconnect()
-        end
-    end)
-    
-    -- Set up cleanup after duration
-    local timer = task.delay(options.duration, function()
-        for _, func in ipairs(cleanup_funcs) do
-            func()
-        end
-        tracker_data[target.UserId] = nil
-    end)
-    
-    table.insert(cleanup_funcs, function()
-        task.cancel(timer)
-    end)
-    
-    -- Store tracker data
-    tracker_data[target.UserId] = {
-        target = target,
-        start_time = tick(),
-        duration = options.duration,
-        cleanup = function()
-            for _, func in ipairs(cleanup_funcs) do
-                func()
+                SuggestionsFrame.Visible = false
+                local tween = CreateTween(CommandBarFrame, {Position = UDim2.new(0.5, 0, 0.7, 0)}, 0.3)
+                tween:Play()
+                tween.Completed:Connect(function()
+                    CommandBarFrame.Visible = false
+                end)
             end
         end
     }
-    
-    return "tracking " .. target.Name .. " for " .. options.duration .. " seconds"
-end, {
-    description = "track a player with advanced visualization",
-    usage = "track <player> [color=r,g,b] [interval=0.1] [duration=30] [path=true/false] [trajectory=true/false] [stats=true/false] [pathlength=60]",
-    aliases = {"follow", "trace"},
-    cooldown = 3,
-    permission_level = 1
-})
+end
 
-command_system.register_command("stoptrack", function(executor, args)
-    if #args < 1 then
-        local count = 0
-        for _, data in pairs(tracker_data) do
-            data.cleanup()
-            count = count + 1
-        end
-        tracker_data = {}
-        return "stopped tracking " .. count .. " players"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    if tracker_data[target.UserId] then
-        tracker_data[target.UserId].cleanup()
-        tracker_data[target.UserId] = nil
-        return "stopped tracking " .. target.Name
-    else
-        return target.Name .. " is not being tracked"
-    end
-end, {
-    description = "stop tracking a player or all players",
-    usage = "stoptrack [player]",
-    aliases = {"untrack", "unfollow"},
-    cooldown = 1,
-    permission_level = 1
-})
+-- Main admin functionality
 
--- Added quality of life commands
-command_system.register_command("tp", function(executor, args)
-    if #args < 1 then
-        return "usage: tp <player1> [player2]"
-    end
+-- Initialize system
+local gui = GuiLibrary.New()
+
+-- Create main tabs
+local mainTab = gui.AddTab("Main", nil, 1)
+local playersTab = gui.AddTab("Players", nil, 2)
+local visualsTab = gui.AddTab("Visuals", nil, 3)
+local toolsTab = gui.AddTab("Tools", nil, 4)
+local settingsTab = gui.AddTab("Settings", nil, 5)
+
+-- Main tab sections
+local mainSection = mainTab.AddSection("Main Controls", false)
+local statusSection = mainTab.AddSection("Status", true)
+
+-- Players tab sections
+local playerListSection = playersTab.AddSection("Player List", false)
+local playerActionSection = playersTab.AddSection("Player Actions", true)
+local playerInfoSection = playersTab.AddSection("Player Info", true)
+
+-- Visuals tab sections
+local espSection = visualsTab.AddSection("ESP Settings", false)
+local interfaceSection = visualsTab.AddSection("Interface", true)
+local worldSection = visualsTab.AddSection("World", true)
+
+-- Tools tab sections
+local utilitySection = toolsTab.AddSection("Utilities", false)
+local miscToolsSection = toolsTab.AddSection("Misc Tools", true)
+
+-- Settings tab sections
+local configSection = settingsTab.AddSection("Configuration", false)
+local themeSection = settingsTab.AddSection("Theme", true)
+local aboutSection = settingsTab.AddSection("About", true)
+
+-- Add main features
+mainSection.AddButton("Refresh Admin", function()
+    gui.ShowNotification("System", "Refreshing admin system...", "info")
     
-    local target1 = find_player(args[1], executor)
-    if not target1 then
-        return "player not found: " .. args[1]
-    end
+    -- Simulate refreshing
+    task.delay(1, function()
+        gui.ShowNotification("System", "Admin system refreshed successfully!", "success")
+    end)
+end)
+
+local flyEnabled = mainSection.AddToggle("Flight Mode", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onFlightToggle", enabled)
+    gui.ShowNotification("Flight", enabled and "Flight mode enabled" or "Flight mode disabled", enabled and "success" or "info")
+end)
+
+local walkspeedValue = mainSection.AddSlider("Walkspeed", 16, 500, 16, function(value)
+    AdminSuite.Internal.FireEvent("onWalkspeedChange", value)
+end)
+
+local jumpPowerValue = mainSection.AddSlider("Jump Power", 50, 500, 50, function(value)
+    AdminSuite.Internal.FireEvent("onJumpPowerChange", value)
+end)
+
+-- Status display
+local statusLabel = statusSection.AddLabel("Status: Ready")
+local pingLabel = statusSection.AddLabel("Ping: Calculating...")
+local fpsLabel = statusSection.AddLabel("FPS: Calculating...")
+
+-- FPS counter
+local lastUpdate = tick()
+local frameCount = 0
+
+RunService.RenderStepped:Connect(function()
+    frameCount = frameCount + 1
     
-    if type(target1) == "table" then
-        return "too many matching players for first argument, be more specific"
-    end
+    local now = tick()
+    local elapsed = now - lastUpdate
     
-    local target2
-    
-    if #args >= 2 then
-        target2 = find_player(args[2], executor)
-        if not target2 then
-            return "player not found: " .. args[2]
-        end
+    if elapsed >= 1 then
+        local fps = math.floor(frameCount / elapsed)
+        fpsLabel.SetText("FPS: " .. fps)
         
-        if type(target2) == "table" then
-            return "too many matching players for second argument, be more specific"
+        -- Update ping as well
+        local ping = math.floor(LocalPlayer:GetNetworkPing() * 1000)
+        pingLabel.SetText("Ping: " .. ping .. "ms")
+        
+        lastUpdate = now
+        frameCount = 0
+    end
+end)
+
+-- Command System
+AdminSuite.Commands = {}
+
+-- Add command function
+local function AddCommand(name, aliases, description, usage, execute)
+    local command = {
+        Name = name,
+        Aliases = aliases or {},
+        Description = description,
+        Usage = usage,
+        Execute = execute
+    }
+    
+    table.insert(AdminSuite.Commands, command)
+    
+    for _, alias in ipairs(aliases or {}) do
+        local aliasCommand = DeepCopy(command)
+        aliasCommand.Name = alias
+        aliasCommand.IsAlias = true
+        aliasCommand.OriginalName = name
+        table.insert(AdminSuite.Commands, aliasCommand)
+    end
+    
+    return command
+end
+
+-- Build Player List
+local playerButtons = {}
+local selectedPlayer = nil
+
+local function UpdatePlayerList()
+    -- Clear existing buttons
+    for _, button in pairs(playerButtons) do
+        button:Destroy()
+    end
+    playerButtons = {}
+    
+    -- Add players
+    for _, player in ipairs(Players:GetPlayers()) do
+        local playerButton = Instance.new("TextButton")
+        playerButton.Size = UDim2.new(1, 0, 0, 40)
+        playerButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        playerButton.BackgroundTransparency = 0.7
+        playerButton.Text = ""
+        playerButton.Parent = playerListSection.Instance
+        
+        local playerName = Instance.new("TextLabel")
+        playerName.Size = UDim2.new(1, -80, 1, 0)
+        playerName.Position = UDim2.new(0, 10, 0, 0)
+        playerName.BackgroundTransparency = 1
+        playerName.Text = FormatPlayerName(player)
+        playerName.Font = Enum.Font.Gotham
+        playerName.TextSize = 14
+        playerName.TextColor3 = AdminSuite.Config.Theme.Text
+        playerName.TextXAlignment = Enum.TextXAlignment.Left
+        playerName.TextTruncate = Enum.TextTruncate.AtEnd
+        playerName.Parent = playerButton
+        
+        -- Select button
+        local selectButton = Instance.new("TextButton")
+        selectButton.Size = UDim2.new(0, 60, 0, 30)
+        selectButton.Position = UDim2.new(1, -70, 0.5, 0)
+        selectButton.AnchorPoint = Vector2.new(0, 0.5)
+        selectButton.BackgroundColor3 = AdminSuite.Config.Theme.Accent
+        selectButton.BackgroundTransparency = 0.5
+        selectButton.Text = "Select"
+        selectButton.Font = Enum.Font.Gotham
+        selectButton.TextSize = 12
+        selectButton.TextColor3 = Color3.new(1, 1, 1)
+        selectButton.Parent = playerButton
+        
+        local buttonCorner = Instance.new("UICorner")
+        buttonCorner.CornerRadius = UDim.new(0, 6)
+        buttonCorner.Parent = selectButton
+        
+        local buttonCorner2 = Instance.new("UICorner")
+        buttonCorner2.CornerRadius = UDim.new(0, 6)
+        buttonCorner2.Parent = playerButton
+        
+        -- Click handlers
+        selectButton.MouseButton1Click:Connect(function()
+            selectedPlayer = player
+            gui.ShowNotification("Player", "Selected " .. player.Name, "info")
+            
+            -- Update player info
+            UpdatePlayerInfo(player)
+        end)
+        
+        table.insert(playerButtons, playerButton)
+    end
+end
+
+-- Update player info panel
+function UpdatePlayerInfo(player)
+    -- Clear existing info
+    for _, child in pairs(playerInfoSection.Instance:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") then
+            child:Destroy()
+        end
+    end
+    
+    if not player or not player:IsA("Player") then
+        playerInfoSection.AddLabel("No player selected")
+        return
+    end
+    
+    -- Add player info
+    playerInfoSection.AddLabel("Name: " .. player.Name)
+    playerInfoSection.AddLabel("Display Name: " .. player.DisplayName)
+    playerInfoSection.AddLabel("UserId: " .. player.UserId)
+    playerInfoSection.AddLabel("Account Age: " .. player.AccountAge .. " days")
+    
+    local character = player.Character
+    if character then
+        playerInfoSection.AddLabel("Health: " .. math.floor((character:FindFirstChild("Humanoid") and character.Humanoid.Health or 0)) .. "/" .. 
+                                   math.floor((character:FindFirstChild("Humanoid") and character.Humanoid.MaxHealth or 0)))
+        
+        -- Position
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
+        if rootPart then
+            local pos = rootPart.Position
+            playerInfoSection.AddLabel("Position: " .. math.floor(pos.X) .. ", " .. math.floor(pos.Y) .. ", " .. math.floor(pos.Z))
         end
     else
-        target2 = executor
+        playerInfoSection.AddLabel("Character: Not loaded")
     end
     
-    local char1 = target1.Character
-    local char2 = target2.Character
-    
-    if not char1 then
-        return "target 1 has no character"
-    end
-    
-    if not char2 then
-        return "target 2 has no character"
-    end
-    
-    local hrp1 = char1:FindFirstChild("HumanoidRootPart")
-    local hrp2 = char2:FindFirstChild("HumanoidRootPart")
-    
-    if not hrp1 then
-        return "target 1 has no HumanoidRootPart"
-    end
-    
-    if not hrp2 then
-        return "target 2 has no HumanoidRootPart"
-    end
-    
-    hrp1.CFrame = hrp2.CFrame * CFrame.new(0, 0, -3)
-    
-    return "teleported " .. target1.Name .. " to " .. target2.Name
-end, {
-    description = "teleport a player to another player",
-    usage = "tp <player1> [player2]",
-    aliases = {"teleport", "goto"},
-    cooldown = 3,
-    permission_level = 1
-})
-
-command_system.register_command("bring", function(executor, args)
-    if #args < 1 then
-        return "usage: bring <player>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        for _, player in ipairs(target) do
-            local success, result = command_system.execute("tp " .. player.Name .. " " .. executor.Name, executor)
+    -- Get device info
+    pcall(function()
+        local success, cap = ReplicatedStorage:RequestDeviceCameraOrientationCapability()
+        if success then
+            playerInfoSection.AddLabel("Device: " .. (cap == Enum.DeviceCameraOrientationMode.LandscapeRight and "Mobile" or "PC/Console"))
+        else
+            playerInfoSection.AddLabel("Device: Unknown")
         end
-        return "brought " .. #target .. " players to you"
+    end)
+    
+    -- Team info
+    playerInfoSection.AddLabel("Team: " .. (player.Team and player.Team.Name or "None"))
+}
+
+-- Initialize player list
+UpdatePlayerList()
+
+-- Update player list when players join/leave
+Players.PlayerAdded:Connect(UpdatePlayerList)
+Players.PlayerRemoving:Connect(UpdatePlayerList)
+
+-- Player actions
+playerActionSection.AddButton("Teleport To", function()
+    if selectedPlayer and selectedPlayer.Character then
+        local myCharacter = LocalPlayer.Character
+        if myCharacter then
+            local targetRoot = selectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local myRoot = myCharacter:FindFirstChild("HumanoidRootPart")
+            
+            if targetRoot and myRoot then
+                myRoot.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
+                gui.ShowNotification("Teleport", "Teleported to " .. selectedPlayer.Name, "success")
+            else
+                gui.ShowNotification("Error", "Could not teleport - missing root parts", "error")
+            end
+        else
+            gui.ShowNotification("Error", "Your character is not loaded", "error")
+        end
     else
-        local success, result = command_system.execute("tp " .. target.Name .. " " .. executor.Name, executor)
-        return "brought " .. target.Name .. " to you"
+        gui.ShowNotification("Error", "No player selected or player's character not loaded", "error")
     end
-end, {
-    description = "bring a player to you",
-    usage = "bring <player>",
-    aliases = {"summon"},
-    cooldown = 3,
-    permission_level = 1
+end)
+
+playerActionSection.AddButton("Spectate", function()
+    if selectedPlayer then
+        AdminSuite.Internal.FireEvent("onSpectateToggle", selectedPlayer)
+        gui.ShowNotification("Spectate", "Now spectating " .. selectedPlayer.Name, "info")
+    else
+        gui.ShowNotification("Error", "No player selected", "error")
+    end
+end)
+
+playerActionSection.AddButton("Stop Spectating", function()
+    AdminSuite.Internal.FireEvent("onSpectateToggle", nil)
+    gui.ShowNotification("Spectate", "Stopped spectating", "info")
+end)
+
+playerActionSection.AddButton("Copy UserId", function()
+    if selectedPlayer then
+        if setclipboard then
+            setclipboard(tostring(selectedPlayer.UserId))
+            gui.ShowNotification("Copied", "UserId copied to clipboard", "success")
+        else
+            gui.ShowNotification("Error", "Clipboard function not available", "error")
+        end
+    else
+        gui.ShowNotification("Error", "No player selected", "error")
+    end
+end)
+
+-- ESP Settings
+local espEnabled = espSection.AddToggle("Enable ESP", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onESPToggle", enabled)
+    gui.ShowNotification("ESP", enabled and "ESP enabled" or "ESP disabled", enabled and "success" or "info")
+end)
+
+local boxEspEnabled = espSection.AddToggle("Box ESP", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onBoxESPToggle", enabled)
+end)
+
+local nameEspEnabled = espSection.AddToggle("Name ESP", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onNameESPToggle", enabled)
+end)
+
+local healthEspEnabled = espSection.AddToggle("Health ESP", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onHealthESPToggle", enabled)
+end)
+
+local distanceEspEnabled = espSection.AddToggle("Distance ESP", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onDistanceESPToggle", enabled)
+end)
+
+local espDistance = espSection.AddSlider("ESP Max Distance", 100, 5000, 2000, function(value)
+    AdminSuite.Internal.FireEvent("onESPDistanceChange", value)
+end)
+
+local espTeamColor = espSection.AddToggle("Use Team Colors", true, function(enabled)
+    AdminSuite.Internal.FireEvent("onESPTeamColorToggle", enabled)
+end)
+
+-- World visuals
+local fullBrightEnabled = worldSection.AddToggle("Full Bright", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onFullBrightToggle", enabled)
+    gui.ShowNotification("Lighting", enabled and "Full brightness enabled" or "Full brightness disabled", enabled and "success" or "info")
+end)
+
+local noFogEnabled = worldSection.AddToggle("No Fog", false, function(enabled)
+    AdminSuite.Internal.FireEvent("onNoFogToggle", enabled)
+end)
+
+-- Utility tools
+utilitySection.AddButton("Server Info", function()
+    local stats = {}
+    stats.Players = #Players:GetPlayers() .. "/" .. Players.MaxPlayers
+    stats.PlaceId = game.PlaceId
+    stats.JobId = game.JobId
+    stats.PrivateServer = game.PrivateServerId ~= ""
+    
+    local message = "Server Info:\n"
+    for k, v in pairs(stats) do
+        message = message .. "• " .. k .. ": " .. tostring(v) .. "\n"
+    end
+    
+    gui.ShowNotification("Server Info", message, "info")
+end)
+
+utilitySection.AddButton("Copy Join Script", function()
+    if setclipboard then
+        local script = [[
+        game:GetService("TeleportService"):TeleportToPlaceInstance(]] .. game.PlaceId .. [[, "]] .. game.JobId .. [[")
+        ]]
+        setclipboard(script)
+        gui.ShowNotification("Copied", "Join script copied to clipboard", "success")
+    else
+        gui.ShowNotification("Error", "Clipboard function not available", "error")
+    end
+end)
+
+-- Miscellaneous Tools
+miscToolsSection.AddButton("Rejoin Server", function()
+    local ts = game:GetService("TeleportService")
+    ts:Teleport(game.PlaceId, LocalPlayer)
+    gui.ShowNotification("Teleport", "Rejoining server...", "info")
+end)
+
+miscToolsSection.AddButton("Server Hop", function()
+    gui.ShowNotification("Server Hop", "Looking for a new server...", "info")
+    
+    -- Simulate server hop (limited by client capabilities)
+    local ts = game:GetService("TeleportService")
+    ts:Teleport(game.PlaceId, LocalPlayer)
+end)
+
+-- Config settings
+local autoSaveToggle = configSection.AddToggle("Auto Save Settings", AdminSuite.Config.AutoSave, function(enabled)
+    AdminSuite.Config.AutoSave = enabled
+    AdminSuite.Internal.SaveConfig()
 })
 
-command_system.register_command("kill", function(executor, args)
-    if #args < 1 then
-        return "usage: kill <player>"
+local cmdPrefixBox = configSection.AddTextBox("Command Prefix", AdminSuite.Config.Prefix, ";", function(text)
+    if #text == 1 then
+        AdminSuite.Config.Prefix = text
+        CommandPrefix.Text = text
+        AdminSuite.Internal.SaveConfig()
+    else
+        gui.ShowNotification("Error", "Prefix must be a single character", "error")
     end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
+end)
+
+local toggleKeyBox = configSection.AddTextBox("Toggle Key", AdminSuite.Config.ToggleKey, "'", function(text)
+    if #text == 1 then
+        AdminSuite.Config.ToggleKey = text
+        AdminSuite.Internal.SaveConfig()
+    else
+        gui.ShowNotification("Error", "Toggle key must be a single character", "error")
     end
+end)
+
+configSection.AddButton("Save Settings", function()
+    AdminSuite.Internal.SaveConfig()
+    gui.ShowNotification("Settings", "Configuration saved successfully", "success")
+end)
+
+configSection.AddButton("Reset Settings", function()
+    -- Reset to defaults
+    AdminSuite.Config = {
+        Prefix = ";",
+        ToggleKey = "'",
+        Theme = {
+            Primary = Color3.fromRGB(40, 40, 60),
+            Secondary = Color3.fromRGB(60, 60, 80),
+            Accent = Color3.fromRGB(100, 100, 255),
+            Text = Color3.fromRGB(255, 255, 255),
+            TextDark = Color3.fromRGB(200, 200, 200)
+        },
+        CommandBarPosition = UDim2.new(0.5, 0, 0.8, 0),
+        UIScale = 1,
+        CommandsPerPage = 10,
+        AutoSave = true
+    }
     
-    local function kill_player(player)
-        local character = player.Character
-        if not character then
-            return false
-        end
-        
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then
-            return false
-        end
-        
-        humanoid.Health = 0
-        return true
-    end
+    AdminSuite.Internal.SaveConfig()
+    gui.ShowNotification("Settings", "Settings reset to defaults", "info")
     
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if kill_player(player) then
-                count = count + 1
+    -- Update UI elements
+    autoSaveToggle.SetValue(AdminSuite.Config.AutoSave)
+    cmdPrefixBox.SetText(AdminSuite.Config.Prefix)
+    toggleKeyBox.SetText(AdminSuite.Config.ToggleKey)
+end)
+
+-- Theme settings
+local primaryColorPicker = themeSection.AddColorPicker("Primary Color", AdminSuite.Config.Theme.Primary, function(color)
+    AdminSuite.Config.Theme.Primary = color
+    AdminSuite.Internal.SaveConfig()
+    gui.ShowNotification("Theme", "Primary color updated. Restart admin to apply changes.", "info")
+end)
+
+local secondaryColorPicker = themeSection.AddColorPicker("Secondary Color", AdminSuite.Config.Theme.Secondary, function(color)
+    AdminSuite.Config.Theme.Secondary = color
+    AdminSuite.Internal.SaveConfig()
+    gui.ShowNotification("Theme", "Secondary color updated. Restart admin to apply changes.", "info")
+end)
+
+local accentColorPicker = themeSection.AddColorPicker("Accent Color", AdminSuite.Config.Theme.Accent, function(color)
+    AdminSuite.Config.Theme.Accent = color
+    AdminSuite.Internal.SaveConfig()
+    gui.ShowNotification("Theme", "Accent color updated. Restart admin to apply changes.", "info")
+end)
+
+-- About section
+aboutSection.AddLabel("XVI Admin Suite")
+aboutSection.AddLabel("Version: 1.0.0")
+aboutSection.AddLabel("Created for client-side admin functionality")
+aboutSection.AddLabel("© 2023 XVI Admin Suite")
+
+-- Define commands
+AddCommand("help", {"cmds", "commands"}, "Shows command list or info about a specific command", "help [command]", function(cmdName)
+    if cmdName then
+        -- Find command
+        for _, cmd in pairs(AdminSuite.Commands) do
+            if cmd.Name:lower() == cmdName:lower() then
+                return "Command: " .. cmd.Name .. "\nDescription: " .. (cmd.Description or "No description") .. 
+                       "\nUsage: " .. AdminSuite.Config.Prefix .. (cmd.Usage or cmd.Name)
             end
         end
-        return "killed " .. count .. " players"
+        return "Command not found: " .. cmdName
     else
-        if kill_player(target) then
-            return "killed " .. target.Name
-        else
-            return "failed to kill " .. target.Name
+        -- List all commands
+        local message = "Available Commands:"
+        local categories = {}
+        
+        for _, cmd in pairs(AdminSuite.Commands) do
+            if not cmd.IsAlias then
+                local category = cmd.Category or "Misc"
+                categories[category] = categories[category] or {}
+                table.insert(categories[category], cmd.Name)
+            end
         end
+        
+        for category, cmds in pairs(categories) do
+            message = message .. "\n\n" .. category .. ":\n"
+            table.sort(cmds)
+            message = message .. table.concat(cmds, ", ")
+        end
+        
+        return message
     end
-end, {
-    description = "kill a player",
-    usage = "kill <player>",
-    aliases = {"slay"},
-    cooldown = 5,
-    permission_level = 2
-})
+end)
 
-command_system.register_command("kick", function(executor, args)
-    if #args < 1 then
-        return "usage: kick <player> [reason]"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    local reason = "Kicked by admin"
-    if #args >= 2 then
-        reason = table.concat(args, " ", 2)
-    end
-    
-    target:Kick(reason)
-    return "kicked " .. target.Name .. " for: " .. reason
-end, {
-    description = "kick a player from the game",
-    usage = "kick <player> [reason]",
-    aliases = {},
-    cooldown = 10,
-    permission_level = 3
-})
-
-command_system.register_command("ban", function(executor, args)
-    if #args < 1 then
-        return "usage: ban <player> [reason]"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    local reason = "Banned by admin"
-    if #args >= 2 then
-        reason = table.concat(args, " ", 2)
-    end
-    
-    -- This would normally connect to a ban system
-    -- For this example, we'll just kick the player
-    target:Kick("BANNED: " .. reason)
-    return "banned " .. target.Name .. " for: " .. reason
-end, {
-    description = "ban a player from the game",
-    usage = "ban <player> [reason]",
-    aliases = {},
-    cooldown = 10,
-    permission_level = 4
-})
-
-command_system.register_command("speed", function(executor, args)
-    if #args < 2 then
-        return "usage: speed <player> <value>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    local speed = tonumber(args[2])
+AddCommand("speed", {"ws", "walkspeed"}, "Sets your walkspeed", "speed <value>", function(speed)
     if not speed then
-        return "invalid speed value"
+        return "Current walkspeed: " .. (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") and 
+                                       LocalPlayer.Character.Humanoid.WalkSpeed or "N/A")
     end
     
-    speed = math.clamp(speed, 0, 1000)
-    
-    local function set_speed(player)
-        local character = player.Character
-        if not character then
-            return false
-        end
-        
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then
-            return false
-        end
-        
-        humanoid.WalkSpeed = speed
-        return true
+    local numSpeed = tonumber(speed)
+    if not numSpeed then
+        return "Invalid speed value. Please enter a number."
     end
     
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if set_speed(player) then
-                count = count + 1
+    local character = LocalPlayer.Character
+    if character and character:FindFirstChild("Humanoid") then
+        character.Humanoid.WalkSpeed = numSpeed
+        walkspeedValue.SetValue(numSpeed)
+        return "Set walkspeed to " .. numSpeed
+    else
+        return "Character or Humanoid not found"
+    end
+end)
+
+AddCommand("jump", {"jp", "jumppower"}, "Sets your jump power", "jump <value>", function(power)
+    if not power then
+        return "Current jump power: " .. (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") and 
+                                       LocalPlayer.Character.Humanoid.JumpPower or "N/A")
+    end
+    
+    local numPower = tonumber(power)
+    if not numPower then
+        return "Invalid jump power value. Please enter a number."
+    end
+    
+    local character = LocalPlayer.Character
+    if character and character:FindFirstChild("Humanoid") then
+        character.Humanoid.JumpPower = numPower
+        jumpPowerValue.SetValue(numPower)
+        return "Set jump power to " .. numPower
+    else
+        return "Character or Humanoid not found"
+    end
+end)
+
+AddCommand("fly", {}, "Toggles flight mode", "fly [speed]", function(speed)
+    local isFlying = flyEnabled.GetValue()
+    flyEnabled.Toggle()
+    
+    if speed then
+        local numSpeed = tonumber(speed)
+        if numSpeed then
+            AdminSuite.Internal.FireEvent("onFlightSpeedChange", numSpeed)
+        end
+    end
+    
+    return isFlying and "Flight disabled" or "Flight enabled"
+end)
+
+AddCommand("noclip", {}, "Toggles noclip mode", "noclip", function()
+    AdminSuite.Internal.FireEvent("onNoclipToggle")
+    return "Toggled noclip"
+end)
+
+AddCommand("esp", {}, "Toggles ESP features", "esp [feature] [on/off]", function(feature, state)
+    if not feature then
+        -- Toggle main ESP
+        espEnabled.Toggle()
+        return "Toggled ESP " .. (espEnabled.GetValue() and "on" or "off")
+    end
+    
+    feature = feature:lower()
+    local toggle = state == "on" or state == "true" or state == "1"
+    
+    if feature == "box" or feature == "boxes" then
+        boxEspEnabled.SetValue(state and toggle or not boxEspEnabled.GetValue())
+        return "Toggled Box ESP " .. (boxEspEnabled.GetValue() and "on" or "off")
+    elseif feature == "name" or feature == "names" then
+        nameEspEnabled.SetValue(state and toggle or not nameEspEnabled.GetValue())
+        return "Toggled Name ESP " .. (nameEspEnabled.GetValue() and "on" or "off")
+    elseif feature == "health" then
+        healthEspEnabled.SetValue(state and toggle or not healthEspEnabled.GetValue())
+        return "Toggled Health ESP " .. (healthEspEnabled.GetValue() and "on" or "off")
+    elseif feature == "distance" then
+        distanceEspEnabled.SetValue(state and toggle or not distanceEspEnabled.GetValue())
+        return "Toggled Distance ESP " .. (distanceEspEnabled.GetValue() and "on" or "off")
+    elseif feature == "team" or feature == "teamcolor" then
+        espTeamColor.SetValue(state and toggle or not espTeamColor.GetValue())
+        return "Toggled Team Color ESP " .. (espTeamColor.GetValue() and "on" or "off")
+    elseif feature == "distance" and tonumber(state) then
+        espDistance.SetValue(tonumber(state))
+        return "Set ESP max distance to " .. tonumber(state)
+    else
+        return "Unknown ESP feature: " .. feature
+    end
+end)
+
+AddCommand("goto", {"to"}, "Teleport to a player", "goto <player>", function(playerName)
+    if not playerName then
+        return "Please specify a player name"
+    end
+    
+    local target = FindPlayer(playerName)
+    if not target then
+        return "Player not found: " .. playerName
+    end
+    
+    local myCharacter = LocalPlayer.Character
+    local targetCharacter = target.Character
+    
+    if not myCharacter or not targetCharacter then
+        return "Character not loaded"
+    end
+    
+    local myRoot = myCharacter:FindFirstChild("HumanoidRootPart")
+    local targetRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
+    
+    if not myRoot or not targetRoot then
+        return "HumanoidRootPart not found"
+    end
+    
+    myRoot.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
+    return "Teleported to " .. target.Name
+end)
+
+AddCommand("bring", {}, "Simulates bringing a player to you (visual only)", "bring <player>", function(playerName)
+    if not playerName then
+        return "Please specify a player name"
+    end
+    
+    local target = FindPlayer(playerName)
+    if not target then
+        return "Player not found: " .. playerName
+    end
+    
+    -- This is client-side only, so we can only manipulate local instances
+    AdminSuite.Internal.FireEvent("onVisualizeBring", target)
+    return "Visualizing bring for " .. target.Name
+end)
+
+AddCommand("spectate", {"spec"}, "Spectate a player", "spectate <player>", function(playerName)
+    if not playerName or playerName == "off" or playerName == "me" then
+        AdminSuite.Internal.FireEvent("onSpectateToggle", nil)
+        return "Stopped spectating"
+    end
+    
+    local target = FindPlayer(playerName)
+    if not target then
+        return "Player not found: " .. playerName
+    end
+    
+    AdminSuite.Internal.FireEvent("onSpectateToggle", target)
+    return "Now spectating " .. target.Name
+end)
+
+AddCommand("rejoin", {"rj"}, "Rejoin the current server", "rejoin", function()
+    local ts = game:GetService("TeleportService")
+    ts:Teleport(game.PlaceId, LocalPlayer)
+    return "Rejoining server..."
+end)
+
+AddCommand("serverhop", {"shop"}, "Join a different server", "serverhop", function()
+    -- Simulate server hop (limited by client capabilities)
+    game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+    return "Looking for a new server..."
+end)
+
+AddCommand("info", {"playerinfo", "pi"}, "Shows information about a player", "info <player>", function(playerName)
+    if not playerName then
+        return "Please specify a player name"
+    end
+    
+    local target = FindPlayer(playerName)
+    if not target then
+        return "Player not found: " .. playerName
+    end
+    
+    -- Generate info
+    local info = "Player: " .. target.Name .. " (@" .. target.DisplayName .. ")\n"
+    info = info .. "UserId: " .. target.UserId .. "\n"
+    info = info .. "Account Age: " .. target.AccountAge .. " days\n"
+    
+    if target.Character then
+        local humanoid = target.Character:FindFirstChild("Humanoid")
+        if humanoid then
+            info = info .. "Health: " .. math.floor(humanoid.Health) .. "/" .. math.floor(humanoid.MaxHealth) .. "\n"
+        end
+        
+        local rootPart = target.Character:FindFirstChild("HumanoidRootPart")
+        if rootPart then
+            local pos = rootPart.Position
+            info = info .. "Position: " .. math.floor(pos.X) .. ", " .. math.floor(pos.Y) .. ", " .. math.floor(pos.Z) .. "\n"
+            
+            -- Distance
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                local myPos = LocalPlayer.Character.HumanoidRootPart.Position
+                local distance = (myPos - pos).Magnitude
+                info = info .. "Distance: " .. math.floor(distance) .. " studs\n"
             end
         end
-        return "set speed to " .. speed .. " for " .. count .. " players"
     else
-        if set_speed(target) then
-            return "set speed to " .. speed .. " for " .. target.Name
-        else
-            return "failed to set speed for " .. target.Name
+        info = info .. "Character: Not loaded\n"
+    end
+    
+    info = info .. "Team: " .. (target.Team and target.Team.Name or "None") .. "\n"
+    
+    -- Get device info
+    pcall(function()
+        local success, cap = game:GetService("ReplicatedStorage"):RequestDeviceCameraOrientationCapability()
+        if success then
+            info = info .. "Device: " .. (cap == Enum.DeviceCameraOrientationMode.LandscapeRight and "Mobile" or "PC/Console") .. "\n"
         end
-    end
-end, {
-    description = "set a player's walk speed",
-    usage = "speed <player> <value>",
-    aliases = {"walkspeed", "ws"},
-    cooldown = 2,
-    permission_level = 1
-})
-
-command_system.register_command("jump", function(executor, args)
-    if #args < 2 then
-        return "usage: jump <player> <value>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    local jump = tonumber(args[2])
-    if not jump then
-        return "invalid jump power value"
-    end
-    
-    jump = math.clamp(jump, 0, 1000)
-    
-    local function set_jump(player)
-        local character = player.Character
-        if not character then
-            return false
-        end
-        
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then
-            return false
-        end
-        
-        humanoid.JumpPower = jump
-        return true
-    end
-    
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if set_jump(player) then
-                count = count + 1
-            end
-        end
-        return "set jump power to " .. jump .. " for " .. count .. " players"
-    else
-        if set_jump(target) then
-            return "set jump power to " .. jump .. " for " .. target.Name
-        else
-            return "failed to set jump power for " .. target.Name
-        end
-    end
-end, {
-    description = "set a player's jump power",
-    usage = "jump <player> <value>",
-    aliases = {"jumppower", "jp"},
-    cooldown = 2,
-    permission_level = 1
-})
-
-command_system.register_command("heal", function(executor, args)
-    if #args < 1 then
-        return "usage: heal <player>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    local function heal_player(player)
-        local character = player.Character
-        if not character then
-            return false
-        end
-        
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then
-            return false
-        end
-        
-        humanoid.Health = humanoid.MaxHealth
-        return true
-    end
-    
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if heal_player(player) then
-                count = count + 1
-            end
-        end
-        return "healed " .. count .. " players"
-    else
-        if heal_player(target) then
-            return "healed " .. target.Name
-        else
-            return "failed to heal " .. target.Name
-        end
-    end
-end, {
-    description = "heal a player to full health",
-    usage = "heal <player>",
-    aliases = {"health"},
-    cooldown = 5,
-    permission_level = 1
-})
-
-command_system.register_command("time", function(executor, args)
-    if #args < 1 then
-        return "usage: time <hour>"
-    end
-    
-    local hour = tonumber(args[1])
-    if not hour then
-        return "invalid time value"
-    end
-    
-    hour = math.clamp(hour, 0, 24)
-    
-    lighting_service.ClockTime = hour
-    
-    return "set time to " .. hour .. ":00"
-end, {
-    description = "set the in-game time",
-    usage = "time <hour>",
-    aliases = {"settime"},
-    cooldown = 5,
-    permission_level = 2
-})
-
-command_system.register_command("day", function(executor, args)
-    lighting_service.ClockTime = 12
-    return "set time to day"
-end, {
-    description = "set the time to day",
-    usage = "day",
-    aliases = {},
-    cooldown = 5,
-    permission_level = 2
-})
-
-command_system.register_command("night", function(executor, args)
-    lighting_service.ClockTime = 0
-    return "set time to night"
-end, {
-    description = "set the time to night",
-    usage = "night",
-    aliases = {},
-    cooldown = 5,
-    permission_level = 2
-})
-
-command_system.register_command("admin", function(executor, args)
-    if #args < 1 then
-        return "usage: admin <player>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    local executor_permission = command_system.get_permission(executor.UserId)
-    if executor_permission < 4 then
-        return "insufficient permissions to make others admin"
-    end
-    
-    command_system.set_permission(target.UserId, 2)
-    return "granted admin permissions to " .. target.Name
-end, {
-    description = "give a player admin permissions",
-    usage = "admin <player>",
-    aliases = {"addadmin"},
-    cooldown = 5,
-    permission_level = 4
-})
-
-command_system.register_command("unadmin", function(executor, args)
-    if #args < 1 then
-        return "usage: unadmin <player>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    local executor_permission = command_system.get_permission(executor.UserId)
-    if executor_permission < 4 then
-        return "insufficient permissions to remove admin"
-    end
-    
-    command_system.set_permission(target.UserId, 0)
-    return "removed admin permissions from " .. target.Name
-end, {
-    description = "remove admin permissions from a player",
-    usage = "unadmin <player>",
-    aliases = {"removeadmin"},
-    cooldown = 5,
-    permission_level = 4
-})
-
-command_system.register_command("cmds", function(executor, args)
-    local executor_permission = command_system.get_permission(executor.UserId)
-    local available_commands = {}
-    
-    for name, metadata in pairs(command_metadata) do
-        if metadata.permission_level <= executor_permission then
-            table.insert(available_commands, {
-                name = name,
-                description = metadata.description,
-                usage = metadata.usage
-            })
-        end
-    end
-    
-    table.sort(available_commands, function(a, b)
-        return a.name < b.name
     end)
     
-    local message = "Available commands:"
-    for _, cmd in ipairs(available_commands) do
-        message = message .. "\n" .. cmd.usage .. " - " .. cmd.description
-    end
-    
-    return message
-end, {
-    description = "list all available commands",
-    usage = "cmds",
-    aliases = {"commands", "help"},
-    cooldown = 5,
-    permission_level = 0
-})
+    return info
+end)
 
-command_system.register_command("spectate", function(executor, args)
-    if #args < 1 then
-        return "usage: spectate <player>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    if type(target) == "table" then
-        return "too many matching players, be more specific"
-    end
-    
-    local character = target.Character
-    if not character then
-        return "target has no character"
-    end
-    
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid then
-        return "target has no humanoid"
-    end
-    
-    executor.CameraSubject = humanoid
-    
-    return "now spectating " .. target.Name
-end, {
-    description = "spectate a player",
-    usage = "spectate <player>",
-    aliases = {"watch", "view"},
-    cooldown = 2,
-    permission_level = 1
-})
+AddCommand("fps", {"showfps"}, "Toggles FPS counter", "fps", function()
+    AdminSuite.Internal.FireEvent("onFPSCounterToggle")
+    return "Toggled FPS counter"
+end)
 
-command_system.register_command("unspectate", function(executor, args)
-    local character = executor.Character
-    if not character then
-        return "you have no character"
-    end
-    
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid then
-        return "you have no humanoid"
-    end
-    
-    executor.CameraSubject = humanoid
-    
-    return "stopped spectating"
-end, {
-    description = "stop spectating",
-    usage = "unspectate",
-    aliases = {"stopwatch", "stopview"},
-    cooldown = 2,
-    permission_level = 1
-})
+AddCommand("ping", {"showping"}, "Toggles ping counter", "ping", function()
+    AdminSuite.Internal.FireEvent("onPingCounterToggle")
+    return "Toggled ping counter"
+end)
 
-command_system.register_command("respawn", function(executor, args)
-    if #args < 1 then
-        local character = executor.Character
-        if character then
-            executor:LoadCharacter()
-            return "respawned yourself"
-        else
-            return "you have no character to respawn"
-        end
+AddCommand("fullbright", {"fb", "brightness"}, "Toggles full brightness", "fullbright", function()
+    fullBrightEnabled.Toggle()
+    return "Toggled full brightness " .. (fullBrightEnabled.GetValue() and "on" or "off")
+end)
+
+AddCommand("nofog", {}, "Toggles fog", "nofog", function()
+    noFogEnabled.Toggle()
+    return "Toggled fog " .. (noFogEnabled.GetValue() and "off" or "on")
+end)
+
+AddCommand("theme", {}, "Changes UI theme color", "theme <primary/secondary/accent> <r> <g> <b>", function(element, r, g, b)
+    if not element or not r or not g or not b then
+        return "Usage: theme <primary/secondary/accent> <r> <g> <b>"
     end
     
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
+    local nr, ng, nb = tonumber(r), tonumber(g), tonumber(b)
+    if not nr or not ng or not nb then
+        return "RGB values must be numbers between 0-255"
     end
     
-    local function respawn_player(player)
-        player:LoadCharacter()
-        return true
-    end
+    nr = math.clamp(nr, 0, 255)
+    ng = math.clamp(ng, 0, 255)
+    nb = math.clamp(nb, 0, 255)
     
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if respawn_player(player) then
-                count = count + 1
-            end
-        end
-        return "respawned " .. count .. " players"
+    local color = Color3.fromRGB(nr, ng, nb)
+    
+    if element:lower() == "primary" then
+        AdminSuite.Config.Theme.Primary = color
+        primaryColorPicker.SetColor(color)
+    elseif element:lower() == "secondary" then
+        AdminSuite.Config.Theme.Secondary = color
+        secondaryColorPicker.SetColor(color)
+    elseif element:lower() == "accent" then
+        AdminSuite.Config.Theme.Accent = color
+        accentColorPicker.SetColor(color)
     else
-        if respawn_player(target) then
-            return "respawned " .. target.Name
-        else
-            return "failed to respawn " .. target.Name
-        end
+        return "Invalid element. Use primary, secondary, or accent"
     end
-end, {
-    description = "respawn a player",
-    usage = "respawn [player]",
-    aliases = {"refresh", "re"},
-    cooldown = 5,
-    permission_level = 1
-})
+    
+    AdminSuite.Internal.SaveConfig()
+    return "Set " .. element .. " color to RGB(" .. nr .. "," .. ng .. "," .. nb .. ")"
+end)
 
-command_system.register_command("freeze", function(executor, args)
-    if #args < 1 then
-        return "usage: freeze <player>"
+AddCommand("prefix", {}, "Changes command prefix", "prefix <character>", function(char)
+    if not char or #char ~= 1 then
+        return "Prefix must be a single character"
     end
     
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
+    AdminSuite.Config.Prefix = char
+    CommandPrefix.Text = char
+    cmdPrefixBox.SetText(char)
+    AdminSuite.Internal.SaveConfig()
+    return "Command prefix changed to '" .. char .. "'"
+end)
+
+AddCommand("togglekey", {}, "Changes UI toggle key", "togglekey <character>", function(char)
+    if not char or #char ~= 1 then
+        return "Toggle key must be a single character"
     end
     
-    local function freeze_player(player)
-        local character = player.Character
-        if not character then
-            return false
-        end
-        
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.Anchored = true
-            end
-        end
-        
-        return true
-    end
-    
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if freeze_player(player) then
-                count = count + 1
-            end
-        end
-        return "froze " .. count .. " players"
+    AdminSuite.Config.ToggleKey = char
+    toggleKeyBox.SetText(char)
+    AdminSuite.Internal.SaveConfig()
+    return "UI toggle key changed to '" .. char .. "'"
+end)
+
+AddCommand("reset", {"respawn"}, "Respawns your character", "reset", function()
+    if LocalPlayer.Character then
+        LocalPlayer.Character:BreakJoints()
+        return "Resetting character..."
     else
-        if freeze_player(target) then
-            return "froze " .. target.Name
-        else
-            return "failed to freeze " .. target.Name
-        end
+        return "Character not loaded"
     end
-end, {
-    description = "freeze a player in place",
-    usage = "freeze <player>",
-    aliases = {"anchor"},
-    cooldown = 3,
-    permission_level = 2
-})
+end)
 
-command_system.register_command("unfreeze", function(executor, args)
-    if #args < 1 then
-        return "usage: unfreeze <player>"
-    end
-    
-    local target = find_player(args[1], executor)
-    if not target then
-        return "player not found: " .. args[1]
-    end
-    
-    local function unfreeze_player(player)
-        local character = player.Character
-        if not character then
-            return false
-        end
-        
-        for _, part in ipairs(character:GetDescendants()) do
-            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                part.Anchored = false
-            end
-        end
-        
-        return true
-    end
-    
-    if type(target) == "table" then
-        local count = 0
-        for _, player in ipairs(target) do
-            if unfreeze_player(player) then
-                count = count + 1
-            end
-        end
-        return "unfroze " .. count .. " players"
-    else
-        if unfreeze_player(target) then
-            return "unfroze " .. target.Name
-        else
-            return "failed to unfreeze " .. target.Name
-        end
-    end
-end, {
-    description = "unfreeze a player",
-    usage = "unfreeze <player>",
-    aliases = {"unanchor"},
-    cooldown = 3,
-    permission_level = 2
-})
+AddCommand("save", {"savesettings"}, "Saves current settings", "save", function()
+    AdminSuite.Internal.SaveConfig()
+    return "Settings saved successfully"
+end)
 
--- helper function to initialize the command system on the server
-function command_system.initialize_server(config)
-    config = config or {}
+AddCommand("version", {"ver"}, "Shows admin version", "version", function()
+    return "XVI Admin Suite\nVersion: 1.0.0\nRunning on: " .. LocalPlayer.Name .. "'s client"
+end)
+
+-- Implement spectate functionality
+local spectating = nil
+local originalCameraCFrame = nil
+local originalCameraSubject = nil
+
+AdminSuite.Internal.ConnectEvent("onSpectateToggle", function(player)
+    local camera = workspace.CurrentCamera
     
-    local default_admins = config.default_admins or {}
-    local prefix = config.prefix or "!"
-    
-    for _, admin_id in ipairs(default_admins) do
-        command_system.set_permission(admin_id, 100) 
+    if spectating then
+        -- Stop spectating
+        camera.CameraSubject = originalCameraSubject
+        if originalCameraCFrame then
+            camera.CFrame = originalCameraCFrame
+        end
+        spectating = nil
     end
     
-    players_service.PlayerAdded:Connect(function(player)
-        player.Chatted:Connect(function(message)
-            if message:sub(1, #prefix) == prefix then
-                local command_text = message:sub(#prefix + 1)
-                local success, result = command_system.execute(command_text, player)
-                
-                if result then
-                    local message_obj = Instance.new("Message")
-                    message_obj.Text = success and "Command: " .. result or "Error: " .. result
-                    message_obj.Parent = player
-                    debris_service:AddItem(message_obj, 3)
-                end
-            end
-        end)
-    end)
+    if player then
+        -- Start spectating
+        originalCameraSubject = camera.CameraSubject
+        originalCameraCFrame = camera.CFrame
+        
+        spectating = player
+        
+        if player.Character and player.Character:FindFirstChild("Humanoid") then
+            camera.CameraSubject = player.Character.Humanoid
+        end
+    end
+end)
+
+-- Implement flight functionality
+local flying = false
+local flySpeed = 2
+local maxFlightSpeed = 20
+
+AdminSuite.Internal.ConnectEvent("onFlightToggle", function(enabled)
+    flying = enabled
     
-    for _, player in ipairs(players_service:GetPlayers()) do
-        player.Chatted:Connect(function(message)
-            if message:sub(1, #prefix) == prefix then
-                local command_text = message:sub(#prefix + 1)
-                local success, result = command_system.execute(command_text, player)
-                
-                if result then
-                    local message_obj = Instance.new("Message")
-                    message_obj.Text = success and "Command: " .. result or "Error: " .. result
-                    message_obj.Parent = player
-                    debris_service:AddItem(message_obj, 3)
-                end
+    if not flying then return end
+    
+    -- Flight implementation
+    local startFlight = function()
+        local character = LocalPlayer.Character
+        if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+        
+        local hrp = character.HumanoidRootPart
+        local velocity = Instance.new("BodyVelocity")
+        velocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+        velocity.Velocity = Vector3.new(0, 0, 0)
+        velocity.Name = "XVI_Flight_Velocity"
+        velocity.Parent = hrp
+        
+        local gyro = Instance.new("BodyGyro")
+        gyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        gyro.D = 100
+        gyro.P = 10000
+        gyro.Name = "XVI_Flight_Gyro"
+        gyro.Parent = hrp
+        
+        -- Flight Loop
+        local flightConnection
+        flightConnection = RunService.RenderStepped:Connect(function()
+            if not flying then
+                flightConnection:Disconnect()
+                if velocity and velocity.Parent then velocity:Destroy() end
+                if gyro and gyro.Parent then gyro:Destroy() end
+                return
             end
+            
+            if not character or not character.Parent or not hrp or not hrp.Parent then
+                flightConnection:Disconnect()
+                return
+            end
+            
+            -- Update gyro orientation
+            local camera = workspace.CurrentCamera
+            gyro.CFrame = camera.CFrame
+            
+            -- Calculate movement direction
+            local movementVector = Vector3.new(0, 0, 0)
+            
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+                movementVector = movementVector + camera.CFrame.LookVector
+            end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+                movementVector = movementVector - camera.CFrame.LookVector
+            end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+                movementVector = movementVector - camera.CFrame.RightVector
+            end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+                movementVector = movementVector + camera.CFrame.RightVector
+            end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+                movementVector = movementVector + Vector3.new(0, 1, 0)
+            end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+                movementVector = movementVector - Vector3.new(0, 1, 0)
+            end
+            
+            -- Normalize and apply speed
+            if movementVector.Magnitude > 0 then
+                movementVector = movementVector.Unit * flySpeed
+            end
+            
+            velocity.Velocity = movementVector * 35
         end)
     end
     
-    print("command system initialized with prefix: " .. prefix)
-    return command_system
-end
+    startFlight()
+end)
 
--- Add support for being loaded via HTTP
-if script then
-    return command_system
-else
-    -- This is being executed directly from loadstring
-    return function()
-        return command_system
-    end
-end
+AdminSuite.Internal.ConnectEvent("onFlightSpeedChange", function(speed)
+    flySpeed = math.clamp(speed, 1, maxFlightSpeed)
+end)
+
+-- Show success notification
+gui.ShowNotification("XVI Admin Suite", "Loaded successfully! Press ' to open menu, ; for command bar.", "success")
+
+return AdminSuite
