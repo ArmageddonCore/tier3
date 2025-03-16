@@ -8,12 +8,12 @@ getgenv().fly_config = {
     },
     movement = {
         base_speed = 100,
-        boost_multiplier = 7.5,
+        boost_multiplier = 4,
         acceleration = 6,
         turn_speed = 3,
         hover_force = 2.1,
         tilt = {
-            forward_angle = 20, -- degrees for forward tilt
+            forward_angle = -20, -- degrees for forward tilt
             application_rate = 0.08, -- how quickly tilt applies (0-1)
         }
     },
@@ -31,7 +31,7 @@ getgenv().fly_config = {
     },
     debug = {
         enabled = true,
-        show_velocity = false,
+        show_velocity = true,
     }
 }
 
